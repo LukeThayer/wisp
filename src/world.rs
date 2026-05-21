@@ -9,6 +9,7 @@ use bevy_enhanced_input::prelude::ContextActivity;
 use crate::input::{player_actions, radial_menu_actions, PlayerContext, RadialMenuContext};
 use crate::magic::LensAnchor;
 use crate::player::{spells::EquippedSpells, Facing, Player, PlayerCamera};
+use crate::spatial::{GameLayer, PortalTraveler};
 
 pub struct WorldPlugin;
 
@@ -41,6 +42,7 @@ fn spawn_world(
         Transform::from_xyz(0.0, -0.25, 0.0),
         RigidBody::Static,
         Collider::cuboid(ground_size.x, ground_size.y, ground_size.z),
+        CollisionLayers::new(GameLayer::Ground, LayerMask::ALL),
     ));
 
     // Lights
@@ -100,6 +102,8 @@ fn spawn_world(
             Mass(mass),
             Friction::new(0.4),
             Restitution::new(0.1),
+            CollisionLayers::new(GameLayer::Default, LayerMask::ALL),
+            PortalTraveler,
         ));
     }
 
@@ -140,6 +144,7 @@ fn spawn_world(
                 LinearDamping(0.5),
                 Friction::new(0.0),
                 Restitution::new(0.0),
+                CollisionLayers::new(GameLayer::Player, LayerMask::ALL),
                 // Origin just inside the capsule's bottom (capsule local extends
                 // to y=-1.0); max_distance is the ground-clearance threshold.
                 RayCaster::new(Vec3::new(0.0, -0.9, 0.0), Dir3::NEG_Y)

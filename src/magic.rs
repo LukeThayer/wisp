@@ -17,6 +17,7 @@ use bevy_enhanced_input::prelude::*;
 use crate::input::{Fire, InputMode, Pickup, ThrowLantern};
 use crate::player::spells::{ActiveSpell, SpellId};
 use crate::player::{Player, PlayerCamera};
+use crate::spatial::{GameLayer, Portal, PortalSlot, PortalTraveler, PORTAL_RADIUS};
 
 pub struct MagicPlugin;
 
@@ -46,6 +47,12 @@ pub struct LensAnchor;
 /// Marker for the beam visualization entity (procedural frustum mesh).
 #[derive(Component)]
 pub struct Beam;
+
+/// Marker for the secondary beam segment that continues out of a portal
+/// when the primary ray refracts through one. Hidden when the beam doesn't
+/// touch a portal.
+#[derive(Component)]
+pub struct PortalBeam;
 
 /// True while the player is holding the Fire action.
 #[derive(Resource, Default)]
@@ -186,6 +193,7 @@ pub fn on_throw_lantern(
     commands.spawn((
         Name::new("Lantern"),
         Lantern,
+        PortalTraveler,
         Mesh3d(meshes.add(Sphere::new(LANTERN_RADIUS))),
         MeshMaterial3d(materials.add(StandardMaterial {
             base_color: Color::srgb(1.0, 0.95, 0.7),
@@ -202,6 +210,7 @@ pub fn on_throw_lantern(
             LinearDamping(0.4),
             AngularDamping(0.5),
             Restitution::new(0.3),
+            CollisionLayers::new(GameLayer::Default, LayerMask::ALL),
         ),
         children![(
             Name::new("LanternLight"),
@@ -245,6 +254,7 @@ pub fn on_fire_end(
     lens: Single<&GlobalTransform, With<LensAnchor>>,
     player_entity: Single<Entity, With<Player>>,
     lanterns: Query<(Entity, &GlobalTransform), With<Lantern>>,
+    portals: Query<(&Portal, &GlobalTransform)>,
     mut forces: Query<Forces>,
 ) {
     channeling.0 = false;
@@ -264,7 +274,8 @@ pub fn on_fire_end(
     iris.burst_timer = IRIS_BURST_DURATION;
     iris.charge = 0.0;
 
-    // One raycast, one big impulse — instant, the opposite of the convex DPS curve.
+    // One raycast, one big impulse — with portal refraction so the burst can
+    // hit anything visible through the portals as well.
     let lens_pos = lens.translation();
     let beam_dir = lens.compute_transform().forward();
     let excluded: Vec<Entity> = lanterns
@@ -273,9 +284,32 @@ pub fn on_fire_end(
         .chain(std::iter::once(*player_entity))
         .collect();
     let filter = SpatialQueryFilter::from_excluded_entities(excluded);
-    if let Some(h) = spatial.cast_ray(lens_pos, beam_dir, BEAM_MAX_RANGE, true, &filter) {
-        if let Ok(mut f) = forces.get_mut(h.entity) {
-            let impulse = *beam_dir * IRIS_BURST_IMPULSE * iris.burst_charge;
+
+    let mut primary_tf: Option<Transform> = None;
+    let mut secondary_tf: Option<Transform> = None;
+    for (portal, gt) in &portals {
+        let tf = gt.compute_transform();
+        match portal.slot {
+            PortalSlot::Primary => primary_tf = Some(tf),
+            PortalSlot::Secondary => secondary_tf = Some(tf),
+        }
+    }
+    let portal_pairs: Vec<(Transform, Transform)> = match (primary_tf, secondary_tf) {
+        (Some(p), Some(s)) => vec![(p, s), (s, p)],
+        _ => Vec::new(),
+    };
+
+    let hit = cast_beam_ray(
+        &spatial,
+        lens_pos,
+        beam_dir,
+        BEAM_MAX_RANGE,
+        &filter,
+        &portal_pairs,
+    );
+    if let Some((dir_at_hit, target)) = hit.impulse_info {
+        if let Ok(mut f) = forces.get_mut(target) {
+            let impulse = dir_at_hit * IRIS_BURST_IMPULSE * iris.burst_charge;
             f.apply_linear_impulse(impulse);
         }
     }
@@ -305,6 +339,19 @@ fn setup_beam(
         Name::new("Beam"),
         Beam,
         Mesh3d(mesh_handle),
+        MeshMaterial3d(material.clone()),
+        Transform::default(),
+        Visibility::Hidden,
+    ));
+
+    // Continuation segment, drawn when the beam refracts through a portal.
+    // Shares the same emissive material; its own mesh is rewritten each frame.
+    let portal_mesh = build_frustum_mesh(LENS_RADIUS, LENS_RADIUS, 1.0, BEAM_SEGMENTS);
+    let portal_mesh_handle = meshes.add(portal_mesh);
+    commands.spawn((
+        Name::new("PortalBeam"),
+        PortalBeam,
+        Mesh3d(portal_mesh_handle),
         MeshMaterial3d(material),
         Transform::default(),
         Visibility::Hidden,
@@ -472,10 +519,34 @@ pub fn cast_beam(
     lens: Single<&GlobalTransform, With<LensAnchor>>,
     player_entity: Single<Entity, With<Player>>,
     lanterns: Query<(Entity, &GlobalTransform), With<Lantern>>,
-    mut beam: Single<(&mut Transform, &mut Visibility, &Mesh3d), With<Beam>>,
+    portals: Query<(&Portal, &GlobalTransform)>,
+    mut beam: Single<
+        (&mut Transform, &mut Visibility, &Mesh3d),
+        (With<Beam>, Without<PortalBeam>),
+    >,
+    mut portal_beam: Single<
+        (&mut Transform, &mut Visibility, &Mesh3d),
+        (With<PortalBeam>, Without<Beam>),
+    >,
     mut forces: Query<Forces>,
 ) {
+    // Build portal pairs once for use by the beam-ray helper. Both directions
+    // are included so the ray can hit either disc.
+    let mut primary_tf: Option<Transform> = None;
+    let mut secondary_tf: Option<Transform> = None;
+    for (portal, gt) in &portals {
+        let tf = gt.compute_transform();
+        match portal.slot {
+            PortalSlot::Primary => primary_tf = Some(tf),
+            PortalSlot::Secondary => secondary_tf = Some(tf),
+        }
+    }
+    let portal_pairs: Vec<(Transform, Transform)> = match (primary_tf, secondary_tf) {
+        (Some(p), Some(s)) => vec![(p, s), (s, p)],
+        _ => Vec::new(),
+    };
     let (beam_tf, beam_vis, beam_mesh) = &mut *beam;
+    let (portal_beam_tf, portal_beam_vis, portal_beam_mesh) = &mut *portal_beam;
 
     // Drop iris state when not on its lens, so a stale charge can't bleed
     // into the next selected spell.
@@ -486,6 +557,7 @@ pub fn cast_beam(
 
     if *mode != InputMode::Player {
         **beam_vis = Visibility::Hidden;
+        **portal_beam_vis = Visibility::Hidden;
         return;
     }
 
@@ -497,6 +569,7 @@ pub fn cast_beam(
         SpellId::ConvexLens => {
             if !power.lens_active {
                 **beam_vis = Visibility::Hidden;
+                **portal_beam_vis = Visibility::Hidden;
                 return;
             }
 
@@ -516,8 +589,15 @@ pub fn cast_beam(
                 .chain(std::iter::once(*player_entity))
                 .collect();
             let filter = SpatialQueryFilter::from_excluded_entities(excluded);
-            let hit = spatial.cast_ray(lens_pos, beam_dir, BEAM_MAX_RANGE, true, &filter);
-            let hit_distance = hit.map(|h| h.distance).unwrap_or(BEAM_MAX_RANGE);
+            let hit = cast_beam_ray(
+                &spatial,
+                lens_pos,
+                beam_dir,
+                BEAM_MAX_RANGE,
+                &filter,
+                &portal_pairs,
+            );
+            let hit_distance = hit.primary_dist;
 
             // Thin-lens: 1/d_o + 1/d_i = 1/f. d_i > 0 → converge, d_i < 0 → diverge.
             let d_o = power.lens_distance;
@@ -549,10 +629,33 @@ pub fn cast_beam(
             beam_tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, *beam_dir);
             **beam_vis = Visibility::Visible;
 
-            if let Some(h) = hit {
-                if let Ok(mut f) = forces.get_mut(h.entity) {
+            // Portal continuation: draw a uniform-radius cylinder from the
+            // exit disc along the bent ray direction up to the next hit.
+            if let Some(bent) = &hit.bent {
+                if let Ok(bent_dir) = Dir3::new(bent.direction) {
+                    if let Some(mesh) = meshes.get_mut(&portal_beam_mesh.0) {
+                        rewrite_frustum(
+                            mesh,
+                            LENS_RADIUS,
+                            LENS_RADIUS,
+                            bent.length,
+                            BEAM_SEGMENTS,
+                        );
+                    }
+                    portal_beam_tf.translation = bent.origin;
+                    portal_beam_tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, *bent_dir);
+                    **portal_beam_vis = Visibility::Visible;
+                } else {
+                    **portal_beam_vis = Visibility::Hidden;
+                }
+            } else {
+                **portal_beam_vis = Visibility::Hidden;
+            }
+
+            if let Some((dir_at_hit, target)) = hit.impulse_info {
+                if let Ok(mut f) = forces.get_mut(target) {
                     let impulse =
-                        *beam_dir * BEAM_IMPULSE_RATE * power.scalar * dt;
+                        dir_at_hit * BEAM_IMPULSE_RATE * power.scalar * dt;
                     f.apply_linear_impulse(impulse);
                 }
             }
@@ -581,25 +684,53 @@ pub fn cast_beam(
                     .chain(std::iter::once(*player_entity))
                     .collect();
                 let filter = SpatialQueryFilter::from_excluded_entities(excluded);
-                let hit =
-                    spatial.cast_ray(lens_pos, beam_dir, BEAM_MAX_RANGE, true, &filter);
-                let length = hit.map(|h| h.distance).unwrap_or(BEAM_MAX_RANGE);
+                let hit = cast_beam_ray(
+                    &spatial,
+                    lens_pos,
+                    beam_dir,
+                    BEAM_MAX_RANGE,
+                    &filter,
+                    &portal_pairs,
+                );
 
                 if let Some(mesh) = meshes.get_mut(&beam_mesh.0) {
                     rewrite_frustum(
                         mesh,
                         IRIS_BURST_RADIUS,
                         IRIS_BURST_RADIUS,
-                        length,
+                        hit.primary_dist,
                         BEAM_SEGMENTS,
                     );
                 }
                 beam_tf.translation = lens_pos;
                 beam_tf.rotation = Quat::from_rotation_arc(Vec3::NEG_Z, *beam_dir);
                 **beam_vis = Visibility::Visible;
+
+                if let Some(bent) = &hit.bent {
+                    if let Ok(bent_dir) = Dir3::new(bent.direction) {
+                        if let Some(mesh) = meshes.get_mut(&portal_beam_mesh.0) {
+                            rewrite_frustum(
+                                mesh,
+                                IRIS_BURST_RADIUS,
+                                IRIS_BURST_RADIUS,
+                                bent.length,
+                                BEAM_SEGMENTS,
+                            );
+                        }
+                        portal_beam_tf.translation = bent.origin;
+                        portal_beam_tf.rotation =
+                            Quat::from_rotation_arc(Vec3::NEG_Z, *bent_dir);
+                        **portal_beam_vis = Visibility::Visible;
+                    } else {
+                        **portal_beam_vis = Visibility::Hidden;
+                    }
+                } else {
+                    **portal_beam_vis = Visibility::Hidden;
+                }
             } else {
                 // --- Charging / decaying ---
                 **beam_vis = Visibility::Hidden;
+                **portal_beam_vis = Visibility::Hidden;
                 if channeling.0 && power.scalar > 0.0 {
                     iris.charge = (iris.charge
                         + power.scalar * IRIS_CHARGE_RATE * dt)
@@ -611,6 +742,109 @@ pub fn cast_beam(
         }
         _ => {
             **beam_vis = Visibility::Hidden;
+            **portal_beam_vis = Visibility::Hidden;
         }
+    }
+}
+
+/// Output of a portal-aware beam raycast.
+pub struct BeamHit {
+    /// How far along the original ray to draw the primary segment — either
+    /// to the world geometry it hit, or to the portal disc it entered.
+    pub primary_dist: f32,
+    /// `(direction_at_final_hit, entity)` for applying impulse. When the
+    /// ray refracted through a portal, the direction is the post-bend ray.
+    pub impulse_info: Option<(Vec3, Entity)>,
+    /// Present when the ray hit a portal disc — the continuation of the
+    /// beam emerging from the paired portal.
+    pub bent: Option<BentSegment>,
+}
+
+/// A beam continuation that emerged from a portal pair's exit.
+pub struct BentSegment {
+    pub origin: Vec3,
+    pub direction: Vec3,
+    pub length: f32,
+}
+
+/// Cast a beam ray with one level of portal refraction. See [`BeamHit`].
+///
+/// Position math matches the object-traveler convention (no `pos_flip`).
+/// Direction math applies an X-180 flip in entry-local — so "into entry"
+/// becomes "out of exit" along the portal normal, the same way a thrown
+/// object's velocity is reversed across the portal frame.
+fn cast_beam_ray(
+    spatial: &SpatialQuery,
+    origin: Vec3,
+    direction: Dir3,
+    max_dist: f32,
+    filter: &SpatialQueryFilter,
+    portal_pairs: &[(Transform, Transform)],
+) -> BeamHit {
+    let world_hit = spatial.cast_ray(origin, direction, max_dist, true, filter);
+    let world_t = world_hit.map(|h| h.distance).unwrap_or(max_dist);
+
+    let mut nearest_portal: Option<(f32, &Transform, &Transform)> = None;
+    for (entry, exit) in portal_pairs {
+        let portal_normal = (entry.rotation * Vec3::Y).normalize();
+        let denom = direction.dot(portal_normal);
+        if denom.abs() < 1e-6 {
+            continue;
+        }
+        let t = (entry.translation - origin).dot(portal_normal) / denom;
+        if t < 0.0 || t > world_t {
+            continue;
+        }
+        let hit_point = origin + *direction * t;
+        let to_hit = hit_point - entry.translation;
+        let radial = (to_hit - portal_normal * to_hit.dot(portal_normal)).length();
+        if radial > PORTAL_RADIUS {
+            continue;
+        }
+        if nearest_portal.map_or(true, |(pt, _, _)| t < pt) {
+            nearest_portal = Some((t, entry, exit));
+        }
+    }
+
+    let Some((portal_t, entry, exit)) = nearest_portal else {
+        return BeamHit {
+            primary_dist: world_t,
+            impulse_info: world_hit.map(|h| (*direction, h.entity)),
+            bent: None,
+        };
+    };
+
+    let portal_hit_point = origin + *direction * portal_t;
+    let entry_inv = entry.rotation.inverse();
+    let local_hit = entry_inv * (portal_hit_point - entry.translation);
+    // Position is a pure frame change. Direction gets a Z-180 flip in the
+    // local frame: still flips the normal axis (so "into entry" becomes
+    // "out of exit") but leaves the in-plane axes oriented such that the
+    // player's left/right and up/down aim shifts come out the same way on
+    // the bent beam. X-180 would have inverted both.
+    let dir_flip = Quat::from_rotation_z(core::f32::consts::PI);
+
+    let new_origin = exit.translation + exit.rotation * local_hit;
+    let new_dir_vec = exit.rotation * dir_flip * entry_inv * *direction;
+
+    let (bent_length, impulse_info) = match Dir3::new(new_dir_vec) {
+        Ok(new_dir) => {
+            let remaining = (max_dist - portal_t).max(0.0);
+            let recursive = spatial.cast_ray(new_origin, new_dir, remaining, true, filter);
+            let len = recursive.map(|h| h.distance).unwrap_or(remaining);
+            let info = recursive.map(|h| (new_dir_vec, h.entity));
+            (len, info)
+        }
+        Err(_) => (0.0, None),
+    };
+
+    BeamHit {
+        primary_dist: portal_t,
+        impulse_info,
+        bent: Some(BentSegment {
+            origin: new_origin,
+            direction: new_dir_vec,
+            length: bent_length,
+        }),
     }
 }
