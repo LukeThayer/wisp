@@ -1,0 +1,23 @@
+// Convex Lens: while Fire is held, projects a beam from the wand whose
+// shape and power depend on the player's distance/alignment to placed
+// lanterns. Bespoke optics math (thin-lens convergence, portal refraction,
+// per-frame mesh reshape) lives in Rust under handler "convex_lens.beam"
+// — the engine handles input + active-slot gating + channeling state.
+SpellDef(
+    id: "convex_lens",
+    label: "Convex Lens",
+    casts: [
+        (
+            id: "convex_lens.beam",
+            label: "Channel",
+            trigger: Hold(action: Fire),
+            // 0.4s wind-up before the beam starts; tick_charge promotes
+            // Charging → Channeling at max_charge.
+            charging: Charging(
+                source: Time(duration: 0.4),
+                max_charge: 1.0,
+            ),
+            payload: Custom(handler: "convex_lens.beam"),
+        ),
+    ],
+)

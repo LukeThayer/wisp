@@ -1,0 +1,40 @@
+// Fireball: charged projectile that detonates on contact.
+//
+// Composition test for the spell-on-spell trigger pipeline:
+//   - trigger:  Press / Fire (PressReleaseCharged would also work; Press
+//               with a short wind-up keeps the test predictable)
+//   - charging: 0.4s to full; must reach max to fire (fizzle below)
+//   - payload:  SpawnBody, fireball template, fast forward throw
+//   - on_event: OnCollision → explosion_small (the child cast)
+//   - cooldown: 1.0s — long enough to read the chain in traces
+//
+// Captured charge (1.0 at full Press) propagates through SpawnBodyMessage
+// → BodyTriggers → ChildCastContext, where explosion_small reads it as a
+// scale factor on the impulse magnitude.
+SpellDef(
+    id: "fireball",
+    label: "Fireball",
+    casts: [
+        (
+            id: "fireball.throw",
+            label: "Throw",
+            trigger: Press(action: Fire),
+            charging: Charging(
+                source: Time(duration: 0.4),
+                min_release: 1.0,
+                max_charge: 1.0,
+            ),
+            cooldown: 1.0,
+            payload: SpawnBody(
+                template: "fireball",
+                launch: Throw(forward: 18.0, up: 2.0),
+                on_event: [
+                    OnCollision(triggers: (
+                        spell_id: "explosion_small",
+                        cast_id: "explosion_small.boom",
+                    )),
+                ],
+            ),
+        ),
+    ],
+)

@@ -1,0 +1,28 @@
+// Explosion (small): sub-spell triggered by fireball's on-collision hook.
+// Not in any equipment loadout — only ever dispatched as a child cast.
+//
+//   trigger:  Press (placeholder — never actually fired from input)
+//   origin:   authored as Wand, OVERRIDDEN at dispatch by
+//             ChildCastContext::origin (the impact point)
+//   target:   Area Sphere(3.0) — explosion radius
+//   payload:  Custom("explosion.impulse") — server-only handler does
+//             the spatial query + outward-impulse application; effects
+//             scale by ctx.captured_charge (parent's stored charge).
+//   effect:   None — handler does the work
+//
+// This file's existence on the client is just so the client catalog
+// validates without missing-spell errors when fireball references it;
+// the client never dispatches it.
+SpellDef(
+    id: "explosion_small",
+    label: "Explosion (small)",
+    casts: [
+        (
+            id: "explosion_small.boom",
+            label: "Boom",
+            trigger: Press(action: Fire),
+            target: Area(shape: Sphere(radius: 3.0)),
+            payload: Custom(handler: "explosion.impulse"),
+        ),
+    ],
+)

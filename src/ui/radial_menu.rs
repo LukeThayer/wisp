@@ -1,3 +1,9 @@
+//! Radial menu: hold F to open, sweep the cursor toward a slot, release to
+//! select. Slot labels come from the [`SpellRegistry`] so the menu has no
+//! spell-specific knowledge. Selection emits a [`SwitchSpell`] event; the
+//! shared dispatcher in `spells::apply_switch_spell` flips the player's
+//! `*Active` marker components.
+
 use bevy::{
     color::palettes::css,
     prelude::*,
@@ -6,7 +12,9 @@ use bevy::{
 use bevy_enhanced_input::prelude::*;
 
 use crate::input::{InputMode, OpenRadial};
-use crate::player::spells::{ActiveSpell, EquippedSpells};
+use crate::player::{LocalPlayer, Player};
+use crate::spells::catalog::SpellCatalog;
+use crate::spells::{ActiveSpell, EquippedSpells, SpellId, SpellRegistry, SwitchSpell};
 
 const SEGMENT_COUNT: usize = 8;
 const RING_RADIUS: f32 = 140.0;
@@ -23,7 +31,6 @@ pub struct RadialSegment {
 #[derive(Component)]
 pub struct RadialCenterLabel;
 
-/// Mouse position relative to the screen center, accumulated while the menu is open.
 #[derive(Resource, Default)]
 pub struct RadialCursor {
     pub offset: Vec2,
@@ -37,29 +44,24 @@ pub fn on_open_radial(
     mut window: Single<&mut Window, With<PrimaryWindow>>,
     mut cursor_opts: Single<&mut CursorOptions, With<PrimaryWindow>>,
     mut radial_cursor: ResMut<RadialCursor>,
-    equipped: Single<&EquippedSpells>,
-    active_spell: Res<ActiveSpell>,
+    registry: Res<SpellRegistry>,
+    catalog: Res<SpellCatalog>,
+    player: Single<(&EquippedSpells, &ActiveSpell), (With<Player>, With<LocalPlayer>)>,
     existing: Query<Entity, With<RadialMenuRoot>>,
 ) {
     if !existing.is_empty() {
         return;
     }
+    let (equipped, active_spell) = *player;
 
     *mode = InputMode::RadialMenu;
-    // Keep the cursor hidden but free to move so we can read its position
-    // for segment selection.
     cursor_opts.grab_mode = CursorGrabMode::Confined;
     cursor_opts.visible = false;
-    // Re-center the cursor when the menu opens so the player starts neutral.
     let center = Vec2::new(window.width(), window.height()) * 0.5;
     window.set_cursor_position(Some(center));
     radial_cursor.offset = Vec2::ZERO;
     radial_cursor.selected = None;
 
-    // Root: full-screen flex container that centers a 0×0 anchor at the
-    // middle of the viewport. Segments are spawned as absolutely positioned
-    // children of the anchor, so their `left`/`top` are offsets from the
-    // screen center.
     let anchor = commands
         .spawn(Node {
             width: Val::Px(0.0),
@@ -71,9 +73,13 @@ pub fn on_open_radial(
     for index in 0..SEGMENT_COUNT {
         let angle = segment_angle(index);
         let dx = angle.cos() * RING_RADIUS;
-        // Screen y grows downward; the ring angle is in math (y-up) space.
         let dy = -angle.sin() * RING_RADIUS;
-        let spell = equipped.0[index];
+        let label = equipped
+            .0
+            .get(index)
+            .and_then(|slot| slot.as_ref())
+            .map(|id| lookup_label(&catalog, &registry, id))
+            .unwrap_or_else(|| "—".to_string());
 
         commands.entity(anchor).with_child((
             RadialSegment { index },
@@ -89,7 +95,7 @@ pub fn on_open_radial(
             },
             BackgroundColor(Color::srgba(0.1, 0.1, 0.15, 0.85)),
             children![(
-                Text::new(spell.label()),
+                Text::new(label),
                 TextFont {
                     font_size: 16.0,
                     ..default()
@@ -99,7 +105,6 @@ pub fn on_open_radial(
         ));
     }
 
-    // Center label sits at the anchor's origin (= screen center).
     commands.entity(anchor).with_child((
         RadialCenterLabel,
         Node {
@@ -114,7 +119,7 @@ pub fn on_open_radial(
         },
         BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.6)),
         children![(
-            Text::new(active_spell.0.label()),
+            Text::new(lookup_label(&catalog, &registry, &active_spell.0)),
             TextFont {
                 font_size: 18.0,
                 ..default()
@@ -170,13 +175,13 @@ pub fn track_cursor(
 }
 
 pub fn detect_release(
-    mode: ResMut<InputMode>,
+    mut mode: ResMut<InputMode>,
     keys: Res<ButtonInput<KeyCode>>,
-    commands: Commands,
-    cursor_opts: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    mut commands: Commands,
+    mut cursor_opts: Single<&mut CursorOptions, With<PrimaryWindow>>,
     radial_cursor: Res<RadialCursor>,
-    active_spell: ResMut<ActiveSpell>,
-    equipped: Single<&EquippedSpells>,
+    player: Single<(Entity, &EquippedSpells), (With<Player>, With<LocalPlayer>)>,
+    mut switch_writer: MessageWriter<SwitchSpell>,
     root: Query<Entity, With<RadialMenuRoot>>,
 ) {
     if *mode != InputMode::RadialMenu {
@@ -185,21 +190,15 @@ pub fn detect_release(
     if !keys.just_released(KeyCode::KeyF) {
         return;
     }
-    close_menu(mode, commands, cursor_opts, radial_cursor, active_spell, equipped, root);
-}
 
-fn close_menu(
-    mut mode: ResMut<InputMode>,
-    mut commands: Commands,
-    mut cursor_opts: Single<&mut CursorOptions, With<PrimaryWindow>>,
-    radial_cursor: Res<RadialCursor>,
-    mut active_spell: ResMut<ActiveSpell>,
-    equipped: Single<&EquippedSpells>,
-    root: Query<Entity, With<RadialMenuRoot>>,
-) {
+    let (player_entity, equipped) = *player;
     if let Some(index) = radial_cursor.selected {
-        active_spell.0 = equipped.0[index];
-        info!("active spell = {}", active_spell.0.label());
+        if let Some(spell) = equipped.0.get(index).and_then(|s| s.as_ref()).cloned() {
+            switch_writer.write(SwitchSpell {
+                player: player_entity,
+                spell,
+            });
+        }
     }
 
     for entity in &root {
@@ -212,19 +211,26 @@ fn close_menu(
 }
 
 fn segment_angle(index: usize) -> f32 {
-    // 0 = right, going counterclockwise (math convention).
-    // Slot 1 sits at the top; rotate by +90° so index 0 is up.
     let step = std::f32::consts::TAU / SEGMENT_COUNT as f32;
     std::f32::consts::FRAC_PI_2 + step * index as f32
+}
+
+/// Resolve a spell's display label: prefer the data-driven catalog;
+/// fall back to the legacy registry for spells not yet migrated to RON.
+fn lookup_label(catalog: &SpellCatalog, registry: &SpellRegistry, id: &SpellId) -> String {
+    if let Some(def) = catalog.get(id) {
+        return def.label.clone();
+    }
+    registry.label(id).to_string()
 }
 
 fn pick_segment(offset: Vec2) -> Option<usize> {
     if offset.length_squared() < 25.0 {
         return None;
     }
-    // Convert screen-space (y-down) angle to math-space (y-up).
     let angle = (-offset.y).atan2(offset.x);
     let step = std::f32::consts::TAU / SEGMENT_COUNT as f32;
-    let normalized = (angle - std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU) % std::f32::consts::TAU;
+    let normalized =
+        (angle - std::f32::consts::FRAC_PI_2 + std::f32::consts::TAU) % std::f32::consts::TAU;
     Some(((normalized / step).round() as usize) % SEGMENT_COUNT)
 }

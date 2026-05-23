@@ -1,0 +1,27 @@
+// Repulsor Field: channeled test spell. Hold Fire to apply a continuous
+// per-second impulse to whatever's in front of you. No visual beam in the
+// built-in Beam delivery yet — gameplay only.
+//   trigger:  Hold / Fire
+//   delivery: Beam, 6m range
+//   effect:   ImpulseTick 40 N·s per second
+SpellDef(
+    id: "repulsor_field",
+    label: "Repulsor Field",
+    casts: [
+        (
+            id: "repulsor_field.push",
+            label: "Push",
+            trigger: Hold(action: Fire),
+            charging: Charging(
+                source: Time(duration: 0.3),
+                max_charge: 1.0,
+            ),
+            target: Forward(distance: 6.0),
+            payload: Beam(
+                portal_aware: false,
+                visual: "default",
+            ),
+            effect: ImpulseTick(magnitude_per_sec: 40.0),
+        ),
+    ],
+)

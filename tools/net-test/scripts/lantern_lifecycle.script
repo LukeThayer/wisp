@@ -1,0 +1,8 @@
+# Throw a lantern with a softer velocity so it lands within walking
+# distance. Then walk over and pick it up. Validates: spawn → settle →
+# despawn is consistent across every observer.
+1.0  goto 0 1.5 -2
+1.5  throw_lantern  0 1.5 -2   0 4 -2
+4.5  goto 0 1.5 -5                   # near the resting place
+5.0  pickup_lantern
+7.0  exit

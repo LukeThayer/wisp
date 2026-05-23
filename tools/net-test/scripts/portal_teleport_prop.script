@@ -1,0 +1,20 @@
+# Place a portal pair, then push a prop through the primary portal with
+# a beam. The prop should emerge at the secondary portal.
+#
+# Layout:
+#   Primary portal at (0, 1.5, -1)   normal (0, 0, 1)  (faces +Z toward shooter)
+#   Secondary portal at (8, 1.5, 0)  normal (-1, 0, 0) (faces -X)
+#
+# Caster is at (0, 1.5, 4). The center sphere prop is at (0, 0.5, 0).
+# Fire a strong beam at the prop in direction roughly (0, -0.243, -0.970),
+# which sends it through the primary portal at z=-1.
+
+# Place portals.
+1.0  goto 0 1.5 4
+1.5  place_portal primary   0 1.5 -1   0 0 1
+2.0  place_portal secondary 8 1.5  0   -1 0 0
+
+# Fire beam to launch the prop into the primary portal.
+3.0  beam  0 1.5 4   0 -0.243 -0.970  30  120
+
+12.0 exit

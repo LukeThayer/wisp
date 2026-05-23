@@ -1,0 +1,15 @@
+# Fireball throw test: spawn a fireball above the central prop, let it
+# fall straight down, and verify the on-collision child cast
+# (explosion_small) dispatches + impulses props within 3m of the impact.
+#
+# Move the observer well outside the explosion radius so the
+# NetworkedPlayer (Dynamic body) doesn't itself get impulsed.
+#
+# Expected trace events:
+#   - script_throw_fireball  (observer-1)
+#   - spawn_body             (server, originating NetworkedProp net_id)
+#   - cast_dispatched        (server, spell=explosion_small, kind=child)
+#   - explosion_applied      (server, hits >= 1)
+0.5  goto 0 1.5 -10
+1.0  throw_fireball  0 5.0 0   0 -5.0 0
+6.0  exit

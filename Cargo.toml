@@ -2,12 +2,39 @@
 name = "wisp"
 version = "0.1.0"
 edition = "2024"
+default-run = "client"
+
+[lib]
+name = "wisp"
+path = "src/lib.rs"
+
+[[bin]]
+name = "client"
+path = "src/bin/client.rs"
+
+[[bin]]
+name = "server"
+path = "src/bin/server.rs"
+
+[[bin]]
+name = "observer"
+path = "src/bin/observer.rs"
 
 [dependencies]
-avian3d = "0.6"
+# Pinned to 0.5 because lightyear_avian3d 0.26.x depends on avian3d 0.5;
+# Cargo's resolver treats 0.5 and 0.6 as separate crates so we can't have
+# both. Once lightyear bumps its avian3d dep we can bump too.
+avian3d = { version = "0.5", features = ["default", "serialize"] }
 bevy = "0.18"
 bevy-inspector-egui = "0.36"
 bevy_enhanced_input = "0.25"
+bevy_common_assets = { version = "0.16", features = ["ron"] }
+lightyear = { version = "0.26.4", features = ["netcode", "udp", "avian3d", "input_bei", "interpolation"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[dev-dependencies]
+ron = "0.10"
 
 [profile.dev]
 opt-level = 1

@@ -1,0 +1,3 @@
+# Watcher with a generous exit timer so it outlives short-running
+# action scripts and can observe their full effects (despawns, etc).
+10.0 exit

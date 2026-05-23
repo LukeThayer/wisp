@@ -1,0 +1,8 @@
+# Aim beam at the center sphere prop at (0, 0.5, 0).
+# From (0, 1.5, 4) the direction is normalize(0, -1, -4) ≈ (0, -0.243, -0.970).
+# Fire one big impulse, wait for the prop to come to rest, then exit.
+1.0  goto 0 1.5 4
+1.5  beam   0 1.5 4   0 -0.243 -0.970   30  100
+2.0  beam   0 1.5 4   0 -0.243 -0.970   30  100
+2.5  beam   0 1.5 4   0 -0.243 -0.970   30  100
+6.0  exit

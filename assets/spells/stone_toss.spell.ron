@@ -1,0 +1,30 @@
+// Stone Toss: trivial test spell. Press Fire to lob a rock forward.
+// Pure data — no Rust code added for this spell.
+//   trigger:  Press / Fire
+//   charging: Time wind-up over 0.5s; must reach full to fire (fizzle if
+//             released early). min_release == max_charge gates the launch.
+//   delivery: SpawnBody with Throw launch (forward 12 m/s, up 1 m/s)
+//   effect:   None (the rock IS the action)
+//   cooldown: 0.5s
+SpellDef(
+    id: "stone_toss",
+    label: "Stone Toss",
+    casts: [
+        (
+            id: "stone_toss.throw",
+            label: "Throw",
+            trigger: Press(action: Fire),
+            charging: Charging(
+                source: Time(duration: 0.5),
+                min_release: 1.0,
+                max_charge: 1.0,
+            ),
+            cooldown: 0.5,
+            // origin defaults to Wand; target defaults to Forward(infinity).
+            payload: SpawnBody(
+                template: "rock",
+                launch: Throw(forward: 12.0, up: 1.0),
+            ),
+        ),
+    ],
+)

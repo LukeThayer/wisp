@@ -1,0 +1,28 @@
+// Physical lantern body: small glowing sphere with a point light.
+// Markers it carries:
+//   - Lantern: identifies it as a beam source for the lens-family spells.
+//   - PortalTraveler: lets it fall through portals like other dynamic props.
+BodyDef(
+    id: "lantern_body",
+    mesh: Sphere(radius: 0.12),
+    material: (
+        base_color: (r: 1.0, g: 0.95, b: 0.7),
+        emissive:   (r: 8.0, g: 6.5,  b: 2.5),
+        roughness: 0.5,
+    ),
+    physics: (
+        body: Dynamic,
+        collider: Sphere(radius: 0.12),
+        mass: 0.4,
+        friction: 1.0,
+        linear_damping: 0.4,
+        angular_damping: 0.5,
+        restitution: 0.3,
+    ),
+    light: Some((
+        color: (r: 1.0, g: 0.92, b: 0.65),
+        intensity: 60000.0,
+        range: 16.0,
+    )),
+    markers: [Lantern, PortalTraveler],
+)

@@ -1,0 +1,21 @@
+// Generic rock projectile body for the Stone Toss test spell.
+// Heavier and less bouncy than a lantern; no light.
+BodyDef(
+    id: "rock",
+    mesh: Cuboid(x: 0.25, y: 0.25, z: 0.25),
+    material: (
+        base_color: (r: 0.35, g: 0.32, b: 0.28),
+        emissive:   (r: 0.0,  g: 0.0,  b: 0.0),
+        roughness: 0.9,
+    ),
+    physics: (
+        body: Dynamic,
+        collider: Cuboid(x: 0.25, y: 0.25, z: 0.25),
+        mass: 1.2,
+        friction: 0.6,
+        linear_damping: 0.15,
+        angular_damping: 0.15,
+        restitution: 0.1,
+    ),
+    markers: [PortalTraveler],
+)

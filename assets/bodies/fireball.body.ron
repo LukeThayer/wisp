@@ -1,0 +1,25 @@
+// Fireball: small fast sphere thrown by the Fireball spell. Configured
+// for short flight + decisive impact: low damping, modest mass, near-zero
+// restitution so it lands rather than bouncing away from the explosion.
+//
+// The "fireball-ness" — exploding on contact — lives on the spell side
+// (see fireball.spell.ron's `on_event`), not here. This body is a
+// generic glowy sphere; another spell could spawn it without explosions.
+BodyDef(
+    id: "fireball",
+    mesh: Sphere(radius: 0.15),
+    material: (
+        base_color: (r: 1.0,  g: 0.55, b: 0.15),
+        emissive:   (r: 1.5,  g: 0.6,  b: 0.1),
+        roughness: 0.4,
+    ),
+    physics: (
+        body: Dynamic,
+        collider: Sphere(radius: 0.15),
+        mass: 0.4,
+        friction: 0.3,
+        linear_damping: 0.1,
+        angular_damping: 0.1,
+        restitution: 0.02,
+    ),
+)

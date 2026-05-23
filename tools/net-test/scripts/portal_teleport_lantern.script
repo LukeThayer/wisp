@@ -1,0 +1,15 @@
+# Place a portal pair, then throw a lantern toward the primary portal.
+# Server should teleport it through to the secondary.
+#
+#   Primary at (0, 1.5, -2)  normal (0, 0, 1)   facing the thrower
+#   Secondary at (8, 1.5, 0) normal (-1, 0, 0)  facing -X
+#
+# Thrower at (0, 1.5, 2) throws lantern with velocity (0, 0, -8) — it
+# travels in -Z and crosses the primary portal disc.
+
+1.0  goto 0 1.5 2
+1.5  place_portal primary   0 1.5 -2   0 0 1
+2.0  place_portal secondary 8 1.5  0   -1 0 0
+3.0  throw_lantern  0 1.5 1   0 0 -8
+
+10.0 exit

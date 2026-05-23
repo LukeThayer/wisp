@@ -13,14 +13,6 @@ impl Plugin for UiPlugin {
             .add_systems(
                 Update,
                 (radial_menu::track_cursor, radial_menu::detect_release).chain(),
-            )
-            .add_systems(
-                Update,
-                (
-                    hud::update_lumen_text,
-                    hud::update_alignment_indicator,
-                    hud::update_iris_charge_bar,
-                ),
             );
     }
 }

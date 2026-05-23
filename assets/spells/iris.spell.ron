@@ -1,0 +1,21 @@
+// Iris: variable-aperture charge-and-release lens. Press to begin
+// charging from the LensPower source (placed lanterns), release to dump a
+// single high-impulse burst. Cap 3.0 of charge; decays at 2/s when no
+// power is feeding in. Bespoke burst impulse + flash visual live in Rust.
+SpellDef(
+    id: "iris",
+    label: "Iris",
+    casts: [
+        (
+            id: "iris.burst",
+            label: "Burst",
+            trigger: PressReleaseCharged(action: Fire),
+            charging: Charging(
+                source: Powered(source: LensPower),
+                max_charge: 3.0,
+                decay_rate: 2.0,
+            ),
+            payload: Custom(handler: "iris.burst"),
+        ),
+    ],
+)

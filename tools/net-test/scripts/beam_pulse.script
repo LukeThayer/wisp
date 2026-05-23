@@ -1,0 +1,6 @@
+# Fire a beam impulse at the centre prop, then exit.
+1.0  goto 0 1.5 4
+1.5  beam  0 1.5 4   0 0 -1   30  20
+2.0  beam  0 1.5 4   0 0 -1   30  20
+2.5  beam  0 1.5 4   0 0 -1   30  20
+5.0  exit

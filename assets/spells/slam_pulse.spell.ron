@@ -1,0 +1,28 @@
+// Slam Pulse: charged test spell. Press Fire to charge over 2s; release
+// to fire a single hitscan impulse. The engine auto-scales the impulse
+// magnitude by `captured_charge` (0..1 for Time-sourced charge), so a full
+// charge hits at 80 N·s, a half-charge at 40 N·s.
+//   trigger:  PressReleaseCharged / Fire
+//   charging: Time, 2.0s to full (max_charge 1.0); decays 1/s when source dry
+//   delivery: Hitscan, 8m range
+//   effect:   Impulse 80 (auto-scaled by captured_charge)
+SpellDef(
+    id: "slam_pulse",
+    label: "Slam Pulse",
+    casts: [
+        (
+            id: "slam_pulse.slam",
+            label: "Slam",
+            trigger: PressReleaseCharged(action: Fire),
+            charging: Charging(
+                source: Time(duration: 2.0),
+                max_charge: 1.0,
+                decay_rate: 1.0,
+            ),
+            cooldown: 0.4,
+            target: Forward(distance: 8.0),
+            payload: Hitscan(portal_aware: false),
+            effect: Impulse(magnitude: 80.0),
+        ),
+    ],
+)

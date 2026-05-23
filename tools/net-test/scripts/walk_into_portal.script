@@ -1,0 +1,7 @@
+# Server spawns observer-1's player at x=-4. Place portal A directly in
+# observer's path so they actually cross it. B is offset so we can see
+# the teleport land.
+1.0  place_portal primary   -4 1.5 5   0 0 1
+1.5  place_portal secondary  4 1.5 5   -1 0 0
+2.0  move_input 0 1
+8.0  exit

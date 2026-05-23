@@ -1,0 +1,2 @@
+# Passive watcher: connects, sits at spawn, exits after 5s.
+5.0 exit

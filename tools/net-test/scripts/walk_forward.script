@@ -1,0 +1,6 @@
+# Drive the server-side controller with WASD-forward for 3 seconds,
+# stop, exit. Tests that the server simulates movement from inputs and
+# both observers see consistent server-authoritative positions.
+1.0  move_input 0 1
+4.0  move_input 0 0
+8.0  exit

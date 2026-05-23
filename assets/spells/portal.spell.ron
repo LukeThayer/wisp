@@ -1,0 +1,35 @@
+// Portal: two casts, one per slot. Each raycasts forward, places a disc,
+// and spawns the through-portal render-to-texture camera. The placement
+// logic is too bespoke to express in generic data (custom shader material,
+// disc-rotation math, per-portal off-screen camera), so both deliveries
+// hand off to custom handlers in Rust. The persistent per-frame teleport
+// pipeline runs as plain Update systems in the same module, independent
+// of cast activity — props placed before a spell switch still traverse.
+SpellDef(
+    id: "portal",
+    label: "Portal",
+    casts: [
+        (
+            id: "portal.place_primary",
+            label: "Primary",
+            trigger: Press(action: Fire),
+            charging: Charging(
+                source: Time(duration: 0.6),
+                min_release: 1.0,
+                max_charge: 1.0,
+            ),
+            payload: Custom(handler: "portal.place_primary"),
+        ),
+        (
+            id: "portal.place_secondary",
+            label: "Secondary",
+            trigger: Press(action: FireSecondary),
+            charging: Charging(
+                source: Time(duration: 0.6),
+                min_release: 1.0,
+                max_charge: 1.0,
+            ),
+            payload: Custom(handler: "portal.place_secondary"),
+        ),
+    ],
+)

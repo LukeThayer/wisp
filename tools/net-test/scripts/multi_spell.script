@@ -1,0 +1,14 @@
+# Exercise all replicated spell paths in one session: throw lantern,
+# fire beam at a prop, place a portal pair.
+1.0  goto 0 1.5 -2
+1.5  throw_lantern  0 1.5 -2   0 4 -2
+2.5  goto 0 1.5 4
+3.0  beam   0 1.5 4   0 -0.243 -0.970   30  60
+3.5  beam   0 1.5 4   0 -0.243 -0.970   30  60
+4.5  place_portal primary    0 1.5 -3   0 0 1
+5.0  place_portal secondary  3 1.5  0   -1 0 0
+# Skip pickup here — beam-pushed props can collide with the lantern
+# server-side and send it further than the throw velocity alone would
+# predict, so the pickup goto target is unreliable. Lantern pickup is
+# covered in its own scripted test (lantern_lifecycle.script).
+9.0  exit
