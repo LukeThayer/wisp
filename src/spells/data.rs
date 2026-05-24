@@ -422,6 +422,20 @@ mod tests {
     }
 
     #[test]
+    fn explosion_small_parses_with_area_damage_effect() {
+        let spell = parse("assets/spells/explosion_small.spell.ron");
+        assert_eq!(spell.id.0, "explosion_small");
+        let cast = &spell.casts[0];
+        match &cast.effect {
+            EffectDef::AreaDamage { base_damage, falloff } => {
+                assert!((*base_damage - 30.0).abs() < 1e-6);
+                assert_eq!(*falloff, crate::spells::damage::FalloffKind::Linear);
+            }
+            other => panic!("expected AreaDamage effect, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn slam_pulse_parses_to_hitscan_with_forward_distance() {
         let spell = parse("assets/spells/slam_pulse.spell.ron");
         let cast = &spell.casts[0];

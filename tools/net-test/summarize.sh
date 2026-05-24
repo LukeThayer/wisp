@@ -156,6 +156,39 @@ cast_chains=$(jq -n "${SLURP[@]}" "
       })
 ")
 
+# Damage events: every server-side `damage_applied`. Ordered by time
+# so harness checks can assert e.g. "the last hp_after value for
+# observer-2's net_id was 0 before the respawn."
+damage_events=$(jq -n "${SLURP[@]}" "
+    ${ALL_EXPR}
+    | map(select(.src == \"server\" and .kind == \"damage_applied\"))
+    | sort_by(.t)
+    | map({
+        target: .target,
+        source: .source,
+        amount: .amount,
+        hp_after: .hp_after,
+        t: .t
+      })
+")
+
+# Deaths: combines server-side `entity_died` (non-player despawns) and
+# `player_respawned` (player respawn). Useful for asserting that the
+# fireball script actually killed someone, irrespective of entity class.
+deaths=$(jq -n "${SLURP[@]}" "
+    ${ALL_EXPR}
+    | map(select(.src == \"server\" and (.kind == \"entity_died\" or .kind == \"player_respawned\")))
+    | sort_by(.t)
+    | map({
+        kind: .kind,
+        entity: .entity,
+        killer: .killer,
+        client_id: .client_id,
+        pos: .pos,
+        t: .t
+      })
+")
+
 jq -n \
     --arg dir "$session_dir" \
     --argjson sources "$sources" \
@@ -165,7 +198,9 @@ jq -n \
     --argjson lanterns "$lanterns" \
     --argjson portals "$portals" \
     --argjson divergence "$divergence" \
-    --argjson cast_chains "$cast_chains" '
+    --argjson cast_chains "$cast_chains" \
+    --argjson damage_events "$damage_events" \
+    --argjson deaths "$deaths" '
 {
     session_dir: $dir,
     sources: $sources,
@@ -175,6 +210,8 @@ jq -n \
     lanterns: $lanterns,
     portals: $portals,
     position_divergence: $divergence,
-    cast_chains: $cast_chains
+    cast_chains: $cast_chains,
+    damage_events: $damage_events,
+    deaths: $deaths
 }
 '

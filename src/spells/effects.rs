@@ -101,9 +101,11 @@ fn apply_impulse(world: &mut World, entity: Entity, impulse: Vec3) {
 /// when the cast carries one. Routes through `damage::apply_aoe_damage`
 /// which handles the spatial query + per-target damage + DeathEvent.
 ///
-/// Player-fired spells default to `Team::Players` source (so casters
-/// don't blast their teammates today). When NPCs / hostile entities
-/// cast damaging spells later, plumb their team through `CastContext`.
+/// `source_team` is `Neutral` so PvP works out of the box — a player's
+/// fireball damages other Players (and Hostiles, and Neutrals). The
+/// caster is excluded by entity (not by team) inside apply_aoe_damage,
+/// so casters can't self-damage with their own spells. Switch this to
+/// the caster's actual team when team-restricted AoE spells appear.
 pub fn area_damage(
     world: &mut World,
     ctx: &CastContext,
@@ -131,6 +133,6 @@ pub fn area_damage(
         // Caster is `ctx.player` — propagated by `dispatch_child_cast`
         // through `original_caster`. None means orphan (caster gone).
         if ctx.player == Entity::PLACEHOLDER { None } else { Some(ctx.player) },
-        Team::Players,
+        Team::Neutral,
     );
 }

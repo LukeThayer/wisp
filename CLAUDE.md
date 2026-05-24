@@ -625,3 +625,28 @@ Expected: `n_chains: 1`, `fireball_chain_present: 1`,
 `explosion_applied: 1`. The chain entry confirms `dispatch_child_cast`
 fired with `caused_by` correlated to the parent cast; the
 `explosion_applied` count confirms the server-side AoE handler ran.
+
+Touched the damage system (`src/spells/damage.rs`, `EffectDef::AreaDamage`
+dispatch in `effects.rs`/`engine.rs`, Hurtbox on player spawn, or the
+attribution map in `src/net/server.rs::ClientPlayerMap`)? Run the
+fireball-kills-player check too:
+
+```bash
+WISP_NET_TEST_TIMEOUT=15 tools/net-test/run_session.sh /tmp/wisp-firekill 2 \
+    tools/net-test/scripts/fireball_kills_player.script \
+    tools/net-test/scripts/idle_long.script
+
+jq '{
+    n_damage_events: (.damage_events | length),
+    n_deaths: (.deaths | length),
+    attribution_present: ([.damage_events[] | select(.source != null)] | length),
+    respawn_kind_present: ([.deaths[] | select(.kind == "player_respawned")] | length)
+}' /tmp/wisp-firekill/summary.json
+```
+
+Expected: `n_damage_events >= 5` (each fireball deals one hit of ~17
+damage at the test geometry), `n_deaths >= 1`, `attribution_present`
+equal to `n_damage_events` (every damage event carries a non-null
+`source` because `ClientPlayerMap` resolved the caster), and
+`respawn_kind_present >= 1` (the player died and respawned, not
+despawned).

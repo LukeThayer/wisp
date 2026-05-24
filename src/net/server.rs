@@ -30,7 +30,7 @@ use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, 
 use crate::spells::portal::{disc_rotation, PORTAL_RADIUS};
 use crate::trace;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub struct ServerNetPlugin;
 
@@ -44,6 +44,7 @@ impl Plugin for ServerNetPlugin {
             addr: default_server_addr(),
         })
         .init_resource::<NetworkedIdAlloc>()
+        .init_resource::<ClientPlayerMap>()
         .add_systems(Startup, (spawn_server, spawn_test_cube, spawn_arena))
         .add_systems(
             Update,
@@ -79,6 +80,15 @@ impl Plugin for ServerNetPlugin {
 pub struct ServerBind {
     pub addr: SocketAddr,
 }
+
+/// Lookup table: connected client id -> their `NetworkedPlayer` entity.
+/// Populated by `sync_networked_players` on spawn and cleaned up by
+/// `despawn_disconnected_players` on disconnect. Used for kill / damage
+/// attribution: `handle_spawn_body` reads it to stamp the originating
+/// caster onto `BodyTriggers`, so child casts (explosions) can credit
+/// kills back to the player who threw the fireball.
+#[derive(Resource, Default)]
+pub struct ClientPlayerMap(pub HashMap<u64, Entity>);
 
 /// Monotonic counter that assigns each replicated entity a peer-stable
 /// `NetworkedId`. Starts at 1; 0 is reserved for "unset".
@@ -193,8 +203,8 @@ fn despawn_disconnected_players(
     connections: Query<&RemoteId, (With<ClientOf>, With<Connected>)>,
     players: Query<(Entity, &NetworkOwner)>,
     mut commands: Commands,
+    mut client_map: ResMut<ClientPlayerMap>,
 ) {
-    use std::collections::HashSet;
     let alive: HashSet<u64> = connections
         .iter()
         .filter_map(|RemoteId(peer_id)| match peer_id {
@@ -208,6 +218,7 @@ fn despawn_disconnected_players(
     for (entity, owner) in &players {
         if !alive.contains(&owner.0) {
             commands.entity(entity).despawn();
+            client_map.0.remove(&owner.0);
             trace::event(
                 "client_disconnected",
                 json!({"client_id": owner.0, "entity": format!("{:?}", entity)}),
@@ -226,8 +237,8 @@ fn sync_networked_players(
     existing: Query<&NetworkOwner>,
     mut commands: Commands,
     mut id_alloc: ResMut<NetworkedIdAlloc>,
+    mut client_map: ResMut<ClientPlayerMap>,
 ) {
-    use std::collections::HashSet;
     let existing_ids: HashSet<u64> = existing.iter().map(|o| o.0).collect();
     let senders: Vec<Entity> = connections.iter().map(|(e, _)| e).collect();
     for (_, RemoteId(peer_id)) in &connections {
@@ -257,7 +268,7 @@ fn sync_networked_players(
                 "pos": [initial.x, initial.y, initial.z],
             }),
         );
-        commands.spawn((
+        let player_entity = commands.spawn((
             (
                 Name::new(format!("NetworkedPlayer({client_id})")),
                 NetworkedPlayer,
@@ -292,7 +303,8 @@ fn sync_networked_players(
             ServerPrevPos::default(),
             ServerPortalLockout::default(),
             Replicate::manual(senders.clone()),
-        ));
+        )).id();
+        client_map.0.insert(client_id, player_entity);
     }
 }
 
@@ -850,14 +862,26 @@ fn handle_place_portal(
 /// `on_event` hooks — attaches a `BodyTriggers` component so collisions
 /// and timers fire child casts via the trigger plugin.
 fn handle_spawn_body(
-    mut receivers: Query<&mut MessageReceiver<SpawnBodyMessage>, With<ClientOf>>,
+    mut receivers: Query<
+        (&RemoteId, &mut MessageReceiver<SpawnBodyMessage>),
+        With<ClientOf>,
+    >,
     senders: Query<Entity, (With<ClientOf>, With<Connected>)>,
     catalog: Option<Res<crate::spells::catalog::SpellCatalog>>,
+    client_map: Res<ClientPlayerMap>,
     mut commands: Commands,
     mut id_alloc: ResMut<NetworkedIdAlloc>,
 ) {
     let current_senders: Vec<Entity> = senders.iter().collect();
-    for mut receiver in &mut receivers {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let sender_client_id = match peer_id {
+            PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => {
+                Some(*id)
+            }
+            _ => None,
+        };
+        let original_caster: Option<Entity> = sender_client_id
+            .and_then(|id| client_map.0.get(&id).copied());
         for msg in receiver.receive() {
             let origin = Vec3::new(msg.origin[0], msg.origin[1], msg.origin[2]);
             let velocity =
@@ -894,13 +918,11 @@ fn handle_spawn_body(
                 }
                 Some(crate::spells::triggers::BodyTriggers {
                     events: on_event.clone(),
-                    // The originating client is identified by the
-                    // `ClientOf` connection; mapping that to the player
-                    // entity is the responsibility of attribution-aware
-                    // child casts (deferred — for now they get None and
-                    // run as orphans, which is fine for the explosion
-                    // case).
-                    original_caster: None,
+                    // Resolved from the sending client's RemoteId via
+                    // `ClientPlayerMap`. `None` means the caster
+                    // disconnected before the body triggered, or the
+                    // peer was an unsupported PeerId variant.
+                    original_caster,
                     captured_charge: p.captured_charge,
                     chain_depth: p.chain_depth,
                     caused_by: Some(crate::spells::data::TriggerSpec {

@@ -1,0 +1,35 @@
+# Fireball-kills-player test: observer-1 drops fireballs directly onto
+# observer-2's server-side spawn position. observer-2 is the target;
+# its companion script (idle_long.script) keeps it sitting still at
+# spawn.
+#
+# Coordinate math: server's sync_networked_players places each
+# NetworkedPlayer at x = (client_id % 8) * 2 - 6, y = 1.5, z = 8.0.
+# run_session.sh assigns client_id = 1000 + observer-index, so:
+#   observer-1 (client 1001): x = -4
+#   observer-2 (client 1002): x = -2
+# We bomb (-2, *, 8.0). Server is authoritative, so observer-2's
+# server-side body stays put; the local `state.pos` belief doesn't
+# affect where the player actually is for damage calcs.
+#
+# Each fireball spawns at (-2, 6, 8) with downward velocity. The
+# explosion radius is 3m + linear falloff; base damage at center =
+# 30 hp. 4 fireballs land sequentially → observer-2 dies, respawns,
+# and possibly dies again.
+#
+# Expected trace events:
+#   - script_throw_fireball  (observer-1, x4)
+#   - spawn_body             (server, x4)
+#   - cast_dispatched        (server, child explosion_small.boom, x4)
+#   - explosion_applied      (server, hits >= 1 each)
+#   - damage_applied         (server, with hp_after decreasing)
+#   - player_respawned       (server, target=observer-2, >=1)
+
+0.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+1.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+2.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+3.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+4.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+5.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+6.5  throw_fireball  -2  6.0  8.0   0  -8.0  0
+9.5  exit

@@ -277,7 +277,10 @@ fn lookup_team(
 
 /// Spatial-query the spell's `TargetDef::Area` and apply damage to every
 /// entity in range that has a `Hurtbox`. Linear falloff scaled by the
-/// area radius. `source_team` gates friendly fire.
+/// area radius. `source_team` gates friendly fire — same-team hurtboxes
+/// are skipped unless `source_team == Team::Neutral`. The caster entity
+/// (`source`) is always excluded so a player can't self-damage with
+/// their own AoE spell, even when `source_team == Neutral`.
 ///
 /// Called from spells that route through `EffectDef::AreaDamage` and
 /// from bespoke handlers that already have the origin in hand (the
@@ -303,6 +306,9 @@ pub fn apply_aoe_damage(
             SystemState::new(world);
         let q = sys_state.get(world);
         for (entity, tf, hurtbox) in q.iter() {
+            if Some(entity) == source {
+                continue;
+            }
             if hurtbox.hp <= 0.0 {
                 continue;
             }
@@ -520,5 +526,42 @@ mod tests {
             "far hp = {far_hp}"
         );
         assert!((mate_hp - 100.0).abs() < 1e-6, "teammate hp = {mate_hp}");
+    }
+
+    #[test]
+    fn apply_aoe_damage_excludes_source_entity() {
+        // Source is on the same team as victims, but should be skipped
+        // by-entity even when source_team is Neutral (which would
+        // otherwise allow damage to everyone).
+        let mut app = world_with_damage_plugin();
+        let caster = app
+            .world_mut()
+            .spawn((
+                Hurtbox::new(100.0, Team::Players),
+                Transform::from_xyz(0.0, 0.0, 0.0),
+                GlobalTransform::from_xyz(0.0, 0.0, 0.0),
+            ))
+            .id();
+        let victim = app
+            .world_mut()
+            .spawn((
+                Hurtbox::new(100.0, Team::Players),
+                Transform::from_xyz(0.5, 0.0, 0.0),
+                GlobalTransform::from_xyz(0.5, 0.0, 0.0),
+            ))
+            .id();
+        apply_aoe_damage(
+            app.world_mut(),
+            Vec3::ZERO,
+            3.0,
+            40.0,
+            FalloffKind::Linear,
+            Some(caster),
+            Team::Neutral,
+        );
+        let caster_hp = app.world().get::<Hurtbox>(caster).unwrap().hp;
+        let victim_hp = app.world().get::<Hurtbox>(victim).unwrap().hp;
+        assert!((caster_hp - 100.0).abs() < 1e-6, "caster hp = {caster_hp}");
+        assert!(victim_hp < 100.0, "victim hp = {victim_hp}");
     }
 }
