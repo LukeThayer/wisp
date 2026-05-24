@@ -39,7 +39,13 @@ impl Plugin for ClientNetPlugin {
         .add_plugins(trace::TracePlugin)
         .insert_resource(ConnectTo {
             server: default_server_addr(),
-            client_id: pseudo_unique_client_id(),
+            // `WISP_CLIENT_ID` lets a test harness pin the id so the
+            // server-side spawn position is deterministic. Real users
+            // get the wall-clock-nanos pseudo-unique id.
+            client_id: std::env::var("WISP_CLIENT_ID")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or_else(pseudo_unique_client_id),
         })
         .add_systems(Startup, spawn_client)
         .add_systems(Update, (send_local_player_input, send_local_customization))
