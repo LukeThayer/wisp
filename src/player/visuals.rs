@@ -1,12 +1,69 @@
 use avian3d::prelude::LinearVelocity;
-use bevy::camera::visibility::NoFrustumCulling;
+use bevy::camera::visibility::{NoFrustumCulling, RenderLayers};
 use bevy::{gltf::Gltf, mesh::skinning::SkinnedMesh, prelude::*};
 
-use crate::player::{Facing, LocalPlayer, Player};
+use bevy_enhanced_input::prelude::Action;
 
-const WIZARD_ASSET: &str = "wizard.glb";
+use crate::input::CycleCharacter;
+use crate::player::{Facing, LocalPlayer, LocalWizardBody, Player, SELF_BODY_LAYER};
 
-/// Animation clip names baked into `wizard.glb`. Using the plain
+/// Available characters the local player can cycle through. Each variant
+/// points at a `.glb` produced by `tools/character/port_character.py` and
+/// must carry the same animation track names listed in the constants
+/// below (they all derive from the Polysplit skeleton + the Mixamo
+/// retarget that lives in `wizard.glb`).
+#[derive(Clone, Copy, Debug)]
+pub struct CharacterDef {
+    pub id: &'static str,
+    pub asset: &'static str,
+    pub label: &'static str,
+}
+
+/// Registry of available characters. Ordered — the cycle action just
+/// advances `CurrentCharacter.index` through this list modulo `len()`.
+#[derive(Resource)]
+pub struct CharacterRegistry {
+    pub characters: Vec<CharacterDef>,
+}
+
+impl Default for CharacterRegistry {
+    fn default() -> Self {
+        // One entry: the unified character glb that holds every class
+        // outfit + face/hair variant. Class selection happens via
+        // `PartSelection` (see `player::parts`), NOT by swapping the
+        // asset. The registry stays as a single-entry slot so the
+        // existing load/swap plumbing keeps compiling without a
+        // bigger refactor; it'll be flattened in a follow-up.
+        Self {
+            characters: vec![CharacterDef {
+                id: "character",
+                asset: "character.glb",
+                label: "Character",
+            }],
+        }
+    }
+}
+
+/// Index of the currently-selected character in `CharacterRegistry`.
+/// `Changed<CurrentCharacter>` drives `apply_character_change` to swap
+/// out the loaded gltf + the local body's SceneRoot.
+#[derive(Resource, Default)]
+pub struct CurrentCharacter {
+    pub index: usize,
+}
+
+impl CurrentCharacter {
+    pub fn current<'a>(&self, registry: &'a CharacterRegistry) -> Option<&'a CharacterDef> {
+        registry.characters.get(self.index)
+    }
+    pub fn advance(&mut self, registry: &CharacterRegistry) {
+        if !registry.characters.is_empty() {
+            self.index = (self.index + 1) % registry.characters.len();
+        }
+    }
+}
+
+/// Animation clip names baked into every character `.glb`. Using the plain
 /// locomotion clips for base movement; the `casting_*` variants are
 /// reserved for the in-progress spell-cast animation pass.
 const IDLE_CLIP: &str = "idle";
@@ -50,13 +107,103 @@ impl WizardAssets {
     pub(crate) fn ready(&self) -> bool {
         self.graph.is_some() && self.idle.is_some()
     }
+
+    /// Read-only access to the active character's gltf handle. The
+    /// recolor module needs this to look up `named_materials` for
+    /// the genericRGBMat_Body / genericRGBMat_Objects slots.
+    pub fn gltf(&self) -> &Handle<Gltf> {
+        &self.gltf
+    }
 }
 
-pub fn load_wizard(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub fn load_wizard(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    registry: Res<CharacterRegistry>,
+    current: Res<CurrentCharacter>,
+) {
+    let Some(def) = current.current(&registry) else {
+        warn!("load_wizard: CurrentCharacter index {} out of range", current.index);
+        return;
+    };
+    info!("character: initial load {:?} from {:?}", def.label, def.asset);
     commands.insert_resource(WizardAssets {
-        gltf: asset_server.load(WIZARD_ASSET),
+        gltf: asset_server.load(def.asset),
         ..default()
     });
+
+    // Top-left label showing the current character. Lets the user verify
+    // visually that the cycle (C key) is actually swapping assets and
+    // which one is rendering right now.
+    commands.spawn((
+        CurrentCharacterLabel,
+        Node {
+            position_type: PositionType::Absolute,
+            left: Val::Px(12.0),
+            top: Val::Px(12.0),
+            padding: UiRect::all(Val::Px(6.0)),
+            ..default()
+        },
+        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.55)),
+        children![(
+            Text::new(def.label),
+            TextFont {
+                font_size: 18.0,
+                ..default()
+            },
+            TextColor(Color::WHITE),
+        )],
+    ));
+}
+
+/// HUD label that mirrors the active `CurrentCharacter`. Update path:
+/// `update_character_label` rewrites its child `Text` whenever
+/// `CurrentCharacter` changes.
+#[derive(Component)]
+pub struct CurrentCharacterLabel;
+
+pub fn update_character_label(
+    registry: Res<CharacterRegistry>,
+    current: Res<CurrentCharacter>,
+    label: Query<&Children, With<CurrentCharacterLabel>>,
+    mut texts: Query<&mut Text>,
+) {
+    if !current.is_changed() {
+        return;
+    }
+    let Some(def) = current.current(&registry) else {
+        return;
+    };
+    for children in &label {
+        for child in children.iter() {
+            if let Ok(mut text) = texts.get_mut(child) {
+                text.0 = def.label.to_string();
+            }
+        }
+    }
+}
+
+/// On `Changed<CurrentCharacter>` (set by the cycle-character input system),
+/// re-load the gltf and clear the animation-graph state so
+/// `build_graph_when_loaded` rebuilds for the new character. The local
+/// body's SceneRoot is also swapped (see `swap_local_body_scene`).
+pub fn apply_character_change(
+    asset_server: Res<AssetServer>,
+    registry: Res<CharacterRegistry>,
+    current: Res<CurrentCharacter>,
+    mut wizard: ResMut<WizardAssets>,
+) {
+    if !current.is_changed() || current.is_added() {
+        return;
+    }
+    let Some(def) = current.current(&registry) else {
+        return;
+    };
+    info!("character: switching to {:?} ({})", def.label, def.asset);
+    *wizard = WizardAssets {
+        gltf: asset_server.load(def.asset),
+        ..default()
+    };
 }
 
 pub fn build_graph_when_loaded(
@@ -108,12 +255,96 @@ pub fn build_graph_when_loaded(
 /// wizard flicker out as soon as the player's feet leave the camera.
 /// Tagging the mesh with `NoFrustumCulling` keeps it rendered regardless
 /// of where the bind-pose AABB sits.
+/// Detects the rising edge of the `CycleCharacter` input and advances
+/// `CurrentCharacter`. The actual swap happens in
+/// `apply_character_change` + `swap_local_body_scene` reacting to the
+/// `Changed<CurrentCharacter>` fired by this advance.
+pub fn cycle_character_on_input(
+    action: Option<Single<&Action<CycleCharacter>>>,
+    mut prev_pressed: Local<bool>,
+    registry: Res<CharacterRegistry>,
+    mut current: ResMut<CurrentCharacter>,
+) {
+    let pressed = action.map(|a| **a.into_inner()).unwrap_or(false);
+    let edge = pressed && !*prev_pressed;
+    *prev_pressed = pressed;
+    if !edge {
+        return;
+    }
+    current.advance(&registry);
+}
+
+/// Swap the local Player's body SceneRoot when `CurrentCharacter` changes.
+///
+/// The body is identified by being a child of the local Player and having
+/// a `SceneRoot` component. Replacing the `SceneRoot` handle causes
+/// Bevy's gltf loader to despawn the existing scene tree (including its
+/// `AnimationPlayer`) and spawn the new one. `attach_animation_graph`
+/// then picks up the new player on a later frame and reattaches the
+/// (also-just-rebuilt) graph.
+pub fn swap_local_body_scene(
+    asset_server: Res<AssetServer>,
+    registry: Res<CharacterRegistry>,
+    current: Res<CurrentCharacter>,
+    mut bodies: Query<&mut SceneRoot, (With<LocalPlayer>, Without<Player>)>,
+) {
+    if !current.is_changed() || current.is_added() {
+        return;
+    }
+    let Some(def) = current.current(&registry) else {
+        return;
+    };
+    let new_handle = asset_server.load(GltfAssetLabel::Scene(0).from_asset(def.asset));
+    for mut scene_root in &mut bodies {
+        scene_root.0 = new_handle.clone();
+    }
+}
+
 pub fn disable_skinned_mesh_culling(
     mut commands: Commands,
     pending: Query<Entity, (With<SkinnedMesh>, Without<NoFrustumCulling>)>,
 ) {
     for entity in &pending {
         commands.entity(entity).insert(NoFrustumCulling);
+    }
+}
+
+/// Walk newly-spawned mesh entities; if any ancestor is `LocalWizardBody`,
+/// stamp `RenderLayers::layer(SELF_BODY_LAYER)`. Bevy does NOT auto-
+/// propagate `RenderLayers` from parent to child, so without this every
+/// mesh inside the gltf scene would default to layer 0 and re-appear in
+/// the main camera (defeating the whole point of the layer filter).
+///
+/// The same descendant walk handles scene-swap: when `swap_local_body_scene`
+/// replaces the SceneRoot handle, the new gltf spawns fresh meshes
+/// without a `RenderLayers` component — `Added` fires for them and we
+/// stamp the layer onto each.
+pub fn propagate_self_body_render_layer(
+    mut commands: Commands,
+    new_meshes: Query<
+        Entity,
+        (
+            Or<(Added<Mesh3d>, Added<SkinnedMesh>)>,
+            Without<RenderLayers>,
+        ),
+    >,
+    parents: Query<&ChildOf>,
+    body_marker: Query<(), With<LocalWizardBody>>,
+) {
+    for entity in &new_meshes {
+        let mut current = entity;
+        loop {
+            if body_marker.contains(current) {
+                commands
+                    .entity(entity)
+                    .insert(RenderLayers::layer(SELF_BODY_LAYER));
+                break;
+            }
+            match parents.get(current) {
+                Ok(parent) => current = parent.0,
+                Err(_) => break,
+            }
+        }
     }
 }
 

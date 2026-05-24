@@ -14,7 +14,11 @@ use lightyear::prelude::{
 };
 
 use crate::input::{Jump, Movement};
-use crate::net::protocol::{PlayerInputChannel, PlayerInputMessage};
+use crate::net::protocol::{
+    CustomizeMessage, PlayerCustomization, PlayerInputChannel, PlayerInputMessage,
+};
+use crate::player::parts::PartSelection;
+use crate::player::recolor::CharacterColors;
 use crate::net::replication::{ReplicationLocalPlugin, ReplicationTracePlugin};
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
 use crate::player::{Facing, LocalPlayer, Player};
@@ -38,7 +42,7 @@ impl Plugin for ClientNetPlugin {
             client_id: pseudo_unique_client_id(),
         })
         .add_systems(Startup, spawn_client)
-        .add_systems(Update, send_local_player_input)
+        .add_systems(Update, (send_local_player_input, send_local_customization))
         .add_observer(on_connected);
     }
 }
@@ -129,9 +133,42 @@ fn send_local_player_input(
     let _ = sender.send::<PlayerInputChannel>(PlayerInputMessage {
         movement: [movement.x, movement.y],
         yaw: facing.yaw,
+        pitch: facing.pitch,
         jump,
         casting,
     });
+}
+
+/// Whenever the local customization (`CharacterColors`,
+/// `CurrentCharacter`) changes, ship a `CustomizeMessage` to the
+/// server. Server stamps it onto our `NetworkedPlayer.PlayerCustomization`
+/// component and component replication broadcasts it to every other
+/// peer. Local rendering doesn't wait for the round-trip — the
+/// recolor system already reads `CharacterColors` directly for the
+/// local body — but every observer will see the new colors once the
+/// server roundtrip completes.
+fn send_local_customization(
+    colors: Res<CharacterColors>,
+    parts: Res<PartSelection>,
+    sender: Option<Single<&mut MessageSender<CustomizeMessage>>>,
+) {
+    if !colors.is_changed() && !parts.is_changed() {
+        return;
+    }
+    let Some(mut sender) = sender else {
+        return;
+    };
+    let to_arr = |c: bevy::prelude::LinearRgba| [c.red, c.green, c.blue];
+    let customization = PlayerCustomization {
+        body: [to_arr(colors.body[0]), to_arr(colors.body[1]), to_arr(colors.body[2])],
+        objects: [
+            to_arr(colors.objects[0]),
+            to_arr(colors.objects[1]),
+            to_arr(colors.objects[2]),
+        ],
+        parts: *parts,
+    };
+    let _ = sender.send::<PlayerInputChannel>(CustomizeMessage { customization });
 }
 
 fn on_connected(

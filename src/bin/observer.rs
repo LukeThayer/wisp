@@ -326,6 +326,7 @@ fn send_simulated_position(
     let _ = sender.send::<PlayerInputChannel>(PlayerInputMessage {
         movement: [state.movement.x, state.movement.y],
         yaw: state.yaw,
+        pitch: 0.0,
         jump: false,
         casting: false,
     });

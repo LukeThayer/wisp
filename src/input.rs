@@ -51,11 +51,22 @@ pub struct ThrowLantern;
 #[action_output(bool)]
 pub struct Pickup;
 
+/// Cycle through the local character roster (wizard, sorcerer, …) on each
+/// press. Visual swap only — does not network-sync. Useful for sampling
+/// the asset-pack characters in-game.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct CycleCharacter;
+
 #[derive(Resource, Default, PartialEq, Eq, Clone, Copy, Debug)]
 pub enum InputMode {
     #[default]
     Player,
     RadialMenu,
+    /// Customization panel open: cursor is free, camera is 3rd-person,
+    /// player input context is inactive so mouse-look + WASD are
+    /// silently consumed by the UI.
+    Customizing,
 }
 
 /// `require_reset: true` keeps a held button from re-firing when the context
@@ -110,6 +121,10 @@ pub fn player_actions() -> impl Bundle {
             action::<Pickup>(),
             bindings![KeyCode::KeyE],
         ),
+        (
+            action::<CycleCharacter>(),
+            bindings![KeyCode::KeyC],
+        ),
     ])
 }
 
@@ -133,6 +148,7 @@ fn sync_contexts(
     let (player_active, menu_active) = match *mode {
         InputMode::Player => (true, false),
         InputMode::RadialMenu => (false, true),
+        InputMode::Customizing => (false, false),
     };
 
     for entity in &q {

@@ -2,6 +2,8 @@
 //! both the single-player world setup and (later) the multiplayer server.
 
 pub mod controller;
+pub mod parts;
+pub mod recolor;
 pub mod visuals;
 
 use avian3d::prelude::*;
@@ -31,7 +33,11 @@ impl Plugin for PlayerPlugin {
         // body's *position* is copied from the server-replicated
         // `NetworkedPosition` for the locally-owned `NetworkedPlayer`
         // by `controller::sync_local_player_from_server`.
-        app.add_observer(controller::apply_look)
+        app.add_plugins(recolor::RecolorPlugin)
+            .add_plugins(parts::PartsPlugin)
+            .add_observer(controller::apply_look)
+            .init_resource::<visuals::CharacterRegistry>()
+            .init_resource::<visuals::CurrentCharacter>()
             .add_systems(Startup, visuals::load_wizard)
             .add_systems(
                 Update,
@@ -39,13 +45,25 @@ impl Plugin for PlayerPlugin {
                     controller::apply_rotation,
                     controller::cursor_grab,
                     controller::sync_local_player_from_server,
+                    controller::track_local_velocity.after(controller::sync_local_player_from_server),
+                    visuals::apply_character_change,
                     visuals::build_graph_when_loaded,
                     visuals::attach_animation_graph,
                     visuals::disable_skinned_mesh_culling,
+                    visuals::propagate_self_body_render_layer,
+                    visuals::swap_local_body_scene,
                     visuals::drive_animation,
+                    visuals::cycle_character_on_input,
+                    visuals::update_character_label,
                 ),
             )
-            .add_systems(FixedUpdate, controller::ground_check);
+            .add_systems(FixedUpdate, controller::ground_check)
+            .add_systems(
+                bevy::app::PostUpdate,
+                controller::apply_aim_pitch_to_local_spine
+                    .after(bevy::app::AnimationSystems)
+                    .before(bevy::transform::TransformSystems::Propagate),
+            );
     }
 }
 
@@ -60,6 +78,19 @@ impl Plugin for PlayerPlugin {
 /// client id.
 #[derive(Component)]
 pub struct LocalPlayer;
+
+/// Marker for the local player's wizard body root entity (carries the
+/// `SceneRoot`). Used by `visuals::propagate_self_body_render_layer` to
+/// scope its descendant walk — without it, every mesh on the local rig
+/// (including the wand tip) would land on the self-body render layer.
+#[derive(Component)]
+pub struct LocalWizardBody;
+
+/// Render layer that the local player's body lives on. Main camera (layer
+/// 0) does NOT see it — keeps you out of your own mesh in first-person.
+/// Portal cameras include this layer, so you can place a portal pair and
+/// see your own character through it.
+pub const SELF_BODY_LAYER: usize = 1;
 
 /// Authorship of the player entity. `Local` for single-player; phase 2 will
 /// add a `Network(ClientId)` variant.
@@ -98,8 +129,12 @@ pub struct CharacterVisuals {
 
 impl Default for CharacterVisuals {
     fn default() -> Self {
+        // The unified character: every class outfit + face/hair
+        // variant in one glb. Visibility is toggled at runtime by
+        // `player::parts::PartSelection` so the customizer can swap
+        // any individual mesh without reloading.
         Self {
-            scene_asset: "wizard.glb",
+            scene_asset: "character.glb",
             body_offset: Vec3::new(0.0, -1.0, 0.0),
             body_yaw: std::f32::consts::PI,
         }
@@ -172,22 +207,28 @@ pub fn spawn_player(
                 ..default()
             }),
             Transform::from_xyz(0.0, 0.7, 0.0),
+            // Layer 0 only by default (1st person — local body lives
+            // on SELF_BODY_LAYER and stays hidden). Toggled to include
+            // SELF_BODY_LAYER while the customizer is open so the
+            // player can see their character in 3rd person.
+            bevy::camera::visibility::RenderLayers::layer(0),
         ))
         .add_child(lens_anchor)
         .id();
 
-    // The local rig's wizard body is for animation + transform anchoring;
-    // we never want the *local* camera to render it, otherwise you see
-    // your own mesh from the inside. Hide it from the rendering side —
-    // the server-replicated `NetworkedPlayer` mirror (which other clients
-    // see) is what carries the visible third-person body.
+    // The local rig's wizard body is the visible third-person mesh of
+    // the player. We use `SELF_BODY_LAYER` render-layer filtering so the
+    // main first-person camera doesn't render it (avoids the
+    // see-inside-mesh problem) but portal cameras do — placing a portal
+    // pair lets you check your character from outside.
     let body = commands
         .spawn((
             Name::new("WizardBody"),
+            LocalWizardBody,
             SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(spawn.visuals.scene_asset))),
             Transform::from_translation(spawn.visuals.body_offset)
                 .with_rotation(Quat::from_rotation_y(spawn.visuals.body_yaw)),
-            Visibility::Hidden,
+            Visibility::default(),
         ))
         .id();
 

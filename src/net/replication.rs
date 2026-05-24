@@ -14,7 +14,8 @@ use avian3d::prelude::*;
 
 use crate::net::protocol::{
     BeamCastBroadcast, NetworkOwner, NetworkedId, NetworkedLantern, NetworkedPlayer,
-    NetworkedPortal, NetworkedPosition, NetworkedProp, PropShape, TestCube,
+    NetworkedPortal, NetworkedPosition, NetworkedProp, PlayerCustomization, PropShape,
+    TestCube,
 };
 use lightyear::prelude::MessageReceiver;
 use crate::physics::GameLayer;
@@ -49,8 +50,19 @@ impl Plugin for ReplicationLocalPlugin {
                 drive_remote_beam_visuals,
                 cleanup_orphan_beam_meshes,
                 hide_self_wizard_body,
+                apply_remote_part_visibility,
             )
                 .chain(),
+        );
+        // Spine pitch override for remote bodies. Has to run in
+        // PostUpdate ordered between AnimationSystems and
+        // TransformSystems::Propagate (same constraint as the local
+        // spine system in player::controller).
+        app.add_systems(
+            bevy::app::PostUpdate,
+            apply_remote_aim_pitch
+                .after(bevy::app::AnimationSystems)
+                .before(bevy::transform::TransformSystems::Propagate),
         );
     }
 }
@@ -172,6 +184,189 @@ fn smooth_networked_transforms(
     }
 }
 
+/// For every mesh under a remote `NetworkedPlayer`'s body, set its
+/// `Visibility` from the replicated `PlayerCustomization.parts`
+/// selection. Caches the resolved node name as a `RemotePartMesh`
+/// component on first sight so subsequent updates are O(meshes) not
+/// O(meshes × hierarchy depth).
+///
+/// Runs every frame; the visibility writes are no-ops when the
+/// selection hasn't changed (Bevy `Visibility::set_changed` checks).
+/// For every `chest_joint` bone under a remote `NetworkedPlayer`'s
+/// body, post-multiply its Transform.rotation with the replicated
+/// aim pitch. Same axis/sign as `controller::apply_aim_pitch_to_local_spine`
+/// (Z axis, inverted pitch — see commentary there). Runs in
+/// PostUpdate after animations so the bone rotation is preserved.
+fn apply_remote_aim_pitch(
+    players: Query<(Entity, &NetworkedPosition), With<NetworkedPlayer>>,
+    bones: Query<(Entity, &Name)>,
+    parents: Query<&ChildOf>,
+    body_marker: Query<(), With<RemoteWizardBody>>,
+    mut transforms: Query<&mut Transform>,
+) {
+    if players.is_empty() {
+        return;
+    }
+    for (entity, name) in &bones {
+        if name.as_str() != crate::player::controller::AIM_PITCH_BONE {
+            continue;
+        }
+        let Some(player_entity) =
+            find_ancestor_networked_player(entity, &parents, &body_marker, &players)
+        else {
+            continue;
+        };
+        let Ok((_, netpos)) = players.get(player_entity) else { continue };
+        let pitch_quat = Quat::from_axis_angle(Vec3::Z, -netpos.pitch);
+        if let Ok(mut tf) = transforms.get_mut(entity) {
+            tf.rotation = tf.rotation * pitch_quat;
+        }
+    }
+}
+
+fn find_ancestor_networked_player(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    body_marker: &Query<(), With<RemoteWizardBody>>,
+    players: &Query<(Entity, &NetworkedPosition), With<NetworkedPlayer>>,
+) -> Option<Entity> {
+    // We expect: chest_joint → ... → RemoteWizardBody → NetworkedPlayer.
+    // Confirm we're under a remote body first to skip the local rig.
+    let mut cur = entity;
+    let mut under_remote_body = false;
+    loop {
+        if body_marker.contains(cur) {
+            under_remote_body = true;
+        }
+        if under_remote_body && players.get(cur).is_ok() {
+            return Some(cur);
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn apply_remote_part_visibility(
+    mut commands: Commands,
+    customizations: Query<
+        &PlayerCustomization,
+        With<NetworkedPlayer>,
+    >,
+    pending: Query<
+        Entity,
+        (
+            With<bevy::mesh::skinning::SkinnedMesh>,
+            Without<RemotePartMesh>,
+        ),
+    >,
+    parents: Query<&ChildOf>,
+    names: Query<&Name>,
+    body_marker: Query<(), With<RemoteWizardBody>>,
+    mut tagged: Query<(&RemotePartMesh, &mut Visibility)>,
+) {
+    // First-time tagging: every new skinned mesh under a remote body
+    // gets a RemotePartMesh marker carrying the player entity and the
+    // mesh's node name (read from the nearest ancestor `Name`).
+    for entity in &pending {
+        if !ancestor_has_marker(entity, &parents, &body_marker) {
+            continue;
+        }
+        let Some((player_entity, _customization)) = find_owning_player(
+            entity,
+            &parents,
+            &customizations,
+        ) else {
+            continue;
+        };
+        let name = nearest_ancestor_name(entity, &parents, &names).unwrap_or_default();
+        commands.entity(entity).insert(RemotePartMesh {
+            player: player_entity,
+            name,
+        });
+    }
+
+    // Per-frame: stamp visibility on every tagged mesh from its
+    // owning player's PartSelection. Only writes when the value
+    // actually changes (Visibility is `PartialEq`).
+    for (tag, mut vis) in &mut tagged {
+        let Ok(customization) = customizations.get(tag.player) else {
+            continue;
+        };
+        let target = if customization.parts.is_visible(&tag.name) {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        };
+        if *vis != target {
+            *vis = target;
+        }
+    }
+}
+
+#[derive(Component)]
+struct RemotePartMesh {
+    player: Entity,
+    name: String,
+}
+
+fn ancestor_has_marker(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    marker: &Query<(), With<RemoteWizardBody>>,
+) -> bool {
+    let mut cur = entity;
+    loop {
+        if marker.contains(cur) {
+            return true;
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return false,
+        }
+    }
+}
+
+fn find_owning_player<'a>(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    customizations: &'a Query<&PlayerCustomization, With<NetworkedPlayer>>,
+) -> Option<(Entity, &'a PlayerCustomization)> {
+    let mut cur = entity;
+    loop {
+        if let Ok(c) = customizations.get(cur) {
+            return Some((cur, c));
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return None,
+        }
+    }
+}
+
+fn nearest_ancestor_name(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    names: &Query<&Name>,
+) -> Option<String> {
+    let mut cur = entity;
+    loop {
+        if let Ok(n) = names.get(cur) {
+            let s = n.as_str();
+            // Skip the auto-generated mesh names ("Mesh.013" etc.) —
+            // we want the node label that carries class/part info.
+            if !s.starts_with("Mesh") {
+                return Some(s.to_string());
+            }
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return None,
+        }
+    }
+}
+
 /// Hide the wizard body on the local client's *own* replicated
 /// `NetworkedPlayer`. The server replicates every player back to every
 /// client including the originator; without this, the local player ends
@@ -262,7 +457,7 @@ fn drain_beam_broadcasts(
 /// from their first-person view (otherwise the camera sits inside the
 /// mesh and the player sees themselves from the inside).
 #[derive(Component)]
-struct RemoteWizardBody;
+pub struct RemoteWizardBody;
 
 /// Beam mesh rendered for a remote player. Stored as a root entity (NOT
 /// a child of the player) so its world-coordinate `origin`/`direction`
@@ -710,7 +905,7 @@ fn on_networked_player_replicated(
                 Name::new("WizardBody"),
                 RemoteWizardBody,
                 SceneRoot(
-                    asset_server.load(GltfAssetLabel::Scene(0).from_asset("wizard.glb")),
+                    asset_server.load(GltfAssetLabel::Scene(0).from_asset("character.glb")),
                 ),
                 Transform::from_xyz(0.0, -1.0, 0.0)
                     .with_rotation(Quat::from_rotation_y(std::f32::consts::PI)),

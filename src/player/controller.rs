@@ -85,9 +85,16 @@ pub fn sync_local_player_from_server(
 }
 
 pub fn apply_rotation(
+    mode: Res<InputMode>,
+    orbit: Res<crate::ui::customization::OrbitCamera>,
     mut player: Single<(&Facing, &mut avian3d::prelude::Rotation), With<Player>>,
-    mut cam: Single<&mut Transform, (With<PlayerCamera>, Without<Player>)>,
+    mut cam: Single<
+        (&mut Transform, &mut bevy::camera::visibility::RenderLayers),
+        (With<PlayerCamera>, Without<Player>),
+    >,
 ) {
+    use crate::player::SELF_BODY_LAYER;
+    let (cam_transform, cam_layers) = &mut *cam;
     // Stage Q: `LightyearAvianPlugin` disables avian's
     // `PhysicsTransformPlugin` and replaces it with its own sync. We
     // can't write `Transform.rotation` directly anymore — the sync
@@ -97,7 +104,28 @@ pub fn apply_rotation(
     // Transform write still works for pitch.
     let (facing, body_rot) = &mut *player;
     body_rot.0 = Quat::from_axis_angle(Vec3::Y, facing.yaw);
-    cam.rotation = Quat::from_axis_angle(Vec3::X, facing.pitch);
+
+    if *mode == InputMode::Customizing {
+        // 3rd-person orbit: position the camera behind+above the
+        // player, looking back at chest height. Player root faces -Z
+        // in its own frame, so +Z is the "behind" direction. A/D in
+        // customization mode drives `OrbitCamera.yaw` which rotates
+        // this offset around the player.
+        const CAM_LOCAL_REST: Vec3 = Vec3::new(0.0, 1.3, 3.5);
+        const LOOK_AT: Vec3 = Vec3::new(0.0, 0.5, 0.0);
+        let orbit_rot = Quat::from_axis_angle(Vec3::Y, orbit.yaw);
+        cam_transform.translation = orbit_rot * CAM_LOCAL_REST;
+        cam_transform.look_at(LOOK_AT, Vec3::Y);
+        // Include the self-body render layer so we can actually see
+        // our character. In 1st person this layer is hidden so the
+        // camera doesn't end up rendering the inside of our own head.
+        **cam_layers = bevy::camera::visibility::RenderLayers::from_layers(&[0, SELF_BODY_LAYER]);
+    } else {
+        // 1st person: head height, no offset, pitch from facing.
+        cam_transform.translation = Vec3::new(0.0, 0.7, 0.0);
+        cam_transform.rotation = Quat::from_axis_angle(Vec3::X, facing.pitch);
+        **cam_layers = bevy::camera::visibility::RenderLayers::layer(0);
+    }
 }
 
 pub fn apply_movement(
@@ -136,10 +164,101 @@ pub fn apply_jump(
     velocity.0.y = JUMP_IMPULSE;
 }
 
+/// Name of the spine bone that drives upper-body aim lean. The
+/// Polysplit rig's spine chain is
+/// `pelvis_joint → waist_joint → chest_joint → neck_joint`; rotating
+/// `chest_joint` leans the torso, leaving the hips and legs planted.
+pub const AIM_PITCH_BONE: &str = "chest_joint";
+
+/// After animation has set bone Transforms, apply the local player's
+/// pitch on top of the spine bone so the body leans with the aim.
+/// Runs in `PostUpdate`, ordered between `AnimationSystems` and
+/// `TransformSystems::Propagate`, so the modification is included in
+/// the per-frame `GlobalTransform` propagation.
+pub fn apply_aim_pitch_to_local_spine(
+    facing: Option<Single<&Facing, (With<Player>, With<LocalPlayer>)>>,
+    bones: Query<(Entity, &Name)>,
+    parents: Query<&ChildOf>,
+    body_marker: Query<(), With<crate::player::LocalWizardBody>>,
+    mut transforms: Query<&mut Transform>,
+) {
+    let Some(facing) = facing else { return };
+    // Bone-local axes on the gltf-imported Polysplit chest bone:
+    // X runs along the spine (its "up"), so rotating around X
+    // twists the torso. Z is the perpendicular sideways axis we
+    // pivot the lean around. Negative sign: facing.pitch is
+    // positive when looking up, but the chest's +Z faces the
+    // wrong way for "lean back" — invert so up-look bends the
+    // upper body back, down-look bends it forward.
+    let pitch_quat = Quat::from_axis_angle(Vec3::Z, -facing.pitch);
+    for (entity, name) in &bones {
+        if name.as_str() != AIM_PITCH_BONE {
+            continue;
+        }
+        if !ancestor_has_body_marker(entity, &parents, &body_marker) {
+            continue;
+        }
+        if let Ok(mut tf) = transforms.get_mut(entity) {
+            // Post-multiply so the animation's bone rotation is
+            // preserved and the aim pitch is added on top in the
+            // bone's local frame.
+            tf.rotation = tf.rotation * pitch_quat;
+        }
+    }
+}
+
+fn ancestor_has_body_marker(
+    entity: Entity,
+    parents: &Query<&ChildOf>,
+    marker: &Query<(), With<crate::player::LocalWizardBody>>,
+) -> bool {
+    let mut cur = entity;
+    loop {
+        if marker.contains(cur) {
+            return true;
+        }
+        match parents.get(cur) {
+            Ok(p) => cur = p.0,
+            Err(_) => return false,
+        }
+    }
+}
+
 pub fn ground_check(mut q: Query<(&mut Facing, &RayHits), With<Player>>) {
     for (mut facing, hits) in &mut q {
         facing.grounded = !hits.is_empty();
     }
+}
+
+/// Derive a synthetic `LinearVelocity` on the local Player rig from
+/// position deltas. The rig is `Kinematic` (Stage Q.5b — server owns
+/// the authoritative movement and we copy Position via
+/// `sync_local_player_from_server`), so avian doesn't integrate
+/// velocity for us. Animation systems (`drive_animation` →
+/// `apply_locomotion_blend`) read `LinearVelocity` to decide between
+/// idle / walk / direction-blended walk clips — without this they'd
+/// see zero speed forever and the body would never play the walk
+/// animation when viewed through portals.
+pub fn track_local_velocity(
+    time: Res<Time>,
+    mut prev_pos: Local<Option<Vec3>>,
+    q: Single<
+        (&avian3d::prelude::Position, &mut LinearVelocity),
+        (With<Player>, With<LocalPlayer>),
+    >,
+) {
+    let (pos, mut vel) = q.into_inner();
+    let current = pos.0;
+    if let Some(prev) = *prev_pos {
+        let dt = time.delta_secs().max(1e-3);
+        let raw = (current - prev) / dt;
+        // Exponential smoothing — ALPHA=0.35 reaches ~95% of a step
+        // input in ~7 frames (~120ms at 60Hz). Matches the cadence
+        // of the locomotion blend so the walk clip doesn't pop in.
+        const ALPHA: f32 = 0.35;
+        vel.0 = vel.0 * (1.0 - ALPHA) + raw * ALPHA;
+    }
+    *prev_pos = Some(current);
 }
 
 pub fn apply_ground_brake(

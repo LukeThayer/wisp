@@ -50,6 +50,7 @@ impl Plugin for ServerNetPlugin {
                 sync_networked_players,
                 refresh_replicate_on_connect,
                 drain_player_inputs,
+                drain_customize_messages,
                 apply_beam_impulses,
                 handle_throw_lantern,
                 handle_pickup_lantern,
@@ -256,13 +257,16 @@ fn sync_networked_players(
             }),
         );
         commands.spawn((
-            Name::new(format!("NetworkedPlayer({client_id})")),
-            NetworkedPlayer,
-            NetworkedId(net_id),
-            BeamCastTimer { last_update: 0.0, active: false },
-            NetworkOwner(client_id),
-            NetworkedPosition::from_vec3(initial),
-            PlayerInputState::default(),
+            (
+                Name::new(format!("NetworkedPlayer({client_id})")),
+                NetworkedPlayer,
+                NetworkedId(net_id),
+                BeamCastTimer { last_update: 0.0, active: false },
+                NetworkOwner(client_id),
+                NetworkedPosition::from_vec3(initial),
+                PlayerInputState::default(),
+                crate::net::protocol::PlayerCustomization::default(),
+            ),
             // Server-authoritative dynamic body (Stage Q option b).
             // Same params as the client-side rig in `src/player/mod.rs`
             // so the local prediction matches what the server simulates.
@@ -286,6 +290,42 @@ fn sync_networked_players(
     }
 }
 
+/// Drains `CustomizeMessage`s and stamps the latest customization onto
+/// the matching `NetworkedPlayer`'s `PlayerCustomization` component.
+/// Component replication propagates the change to every connected
+/// client; on each client, the recolor system reads the component off
+/// the NetworkedPlayer entity and updates the material tints.
+fn drain_customize_messages(
+    mut receivers: Query<
+        (&RemoteId, &mut MessageReceiver<crate::net::protocol::CustomizeMessage>),
+        With<ClientOf>,
+    >,
+    mut players: Query<
+        (&NetworkOwner, &mut crate::net::protocol::PlayerCustomization),
+        With<NetworkedPlayer>,
+    >,
+) {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let client_id = match peer_id {
+            PeerId::Netcode(id) => *id,
+            PeerId::Steam(id) => *id,
+            PeerId::Local(id) => *id,
+            PeerId::Entity(id) => *id,
+            _ => continue,
+        };
+        let mut latest = None;
+        for msg in receiver.receive() {
+            latest = Some(msg);
+        }
+        let Some(msg) = latest else { continue };
+        for (owner, mut customization) in &mut players {
+            if owner.0 == client_id {
+                *customization = msg.customization;
+            }
+        }
+    }
+}
+
 /// Per-player record of the most-recent client input. Refreshed every
 /// `Update` by `drain_player_inputs`; consumed every `FixedUpdate` by
 /// `run_player_controller`.
@@ -293,6 +333,7 @@ fn sync_networked_players(
 struct PlayerInputState {
     movement: Vec2,
     yaw: f32,
+    pitch: f32,
     jump: bool,
     casting: bool,
 }
@@ -325,6 +366,7 @@ fn drain_player_inputs(
             if owner.0 == client_id {
                 input.movement = Vec2::new(msg.movement[0], msg.movement[1]);
                 input.yaw = msg.yaw;
+                input.pitch = msg.pitch;
                 input.jump = msg.jump;
                 input.casting = msg.casting;
             }
@@ -364,7 +406,10 @@ fn run_player_controller(
     let dt = time.delta_secs().max(1e-5);
 
     for (entity, input, tf, mut forces) in &mut players {
-        // Ground check: short ray below the capsule.
+        // Ground check: short ray below the capsule. Exclude THIS
+        // player (filter is per-iteration, not the global "first
+        // player" snapshot the old code used — see commentary in
+        // `sync_player_positions`).
         let ray_origin =
             tf.translation + Vec3::new(0.0, -0.6 - 0.4, 0.0); // half-height - radius
         let grounded = spatial
@@ -404,20 +449,24 @@ fn run_player_controller(
 /// Replaces the old write-from-message path in `apply_position_updates`.
 fn sync_player_positions(
     mut q: Query<
-        (&Transform, &PlayerInputState, &mut NetworkedPosition),
+        (Entity, &Transform, &PlayerInputState, &mut NetworkedPosition),
         (With<NetworkedPlayer>, Changed<Transform>),
     >,
     spatial: SpatialQuery,
-    players: Query<Entity, With<NetworkedPlayer>>,
 ) {
-    for (tf, input, mut netpos) in &mut q {
+    for (entity, tf, input, mut netpos) in &mut q {
         netpos.x = tf.translation.x;
         netpos.y = tf.translation.y;
         netpos.z = tf.translation.z;
         netpos.yaw = input.yaw;
+        netpos.pitch = input.pitch;
         netpos.casting = input.casting;
-        // Derive airborne server-side instead of trusting client.
-        let entity = players.iter().next().unwrap_or(Entity::PLACEHOLDER);
+        // Derive airborne server-side instead of trusting client. The
+        // ray-filter exclusion has to be THIS player (not "any
+        // player" — that was the previous bug; with multiple peers,
+        // `players.iter().next()` always returned the first one, so
+        // the second player's ray got blocked by its own capsule and
+        // `airborne` was stuck false for them).
         let ray_origin = tf.translation + Vec3::new(0.0, -1.0, 0.0);
         let grounded = spatial
             .cast_ray(

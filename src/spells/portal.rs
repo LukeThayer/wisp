@@ -11,6 +11,7 @@
 use std::collections::HashSet;
 
 use avian3d::prelude::*;
+use bevy::camera::visibility::RenderLayers;
 use bevy::camera::RenderTarget;
 use bevy::pbr::{Material, MaterialPlugin};
 use bevy::prelude::*;
@@ -21,7 +22,7 @@ use lightyear::prelude::{MessageSender, Replicated};
 
 use crate::net::protocol::{NetworkedPortal, PlacePortalMessage, PlayerInputChannel};
 use crate::physics::GameLayer;
-use crate::player::{Facing, LocalPlayer, Player, PlayerCamera};
+use crate::player::{Facing, LocalPlayer, Player, PlayerCamera, SELF_BODY_LAYER};
 use crate::spells::data::HandlerId;
 use crate::spells::handlers::HandlerRegistry;
 use crate::spells::markers::Lantern;
@@ -292,6 +293,11 @@ fn on_networked_portal_replicated(
             ..default()
         }),
         Transform::default(),
+        // Include the local player's body layer so a portal pair lets
+        // the user see their own character from outside. Default world
+        // (layer 0) still renders. Other clients' bodies are on layer 0
+        // already so they're unaffected.
+        RenderLayers::from_layers(&[0, SELF_BODY_LAYER]),
     ));
 }
 

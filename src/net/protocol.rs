@@ -37,6 +37,11 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<TestCube>();
         app.register_component::<NetworkedPlayer>();
         app.register_component::<NetworkOwner>();
+        // Per-player cosmetic state: 6 tint colors + archetype index.
+        // Server is authoritative; updates flow as
+        // `CustomizeMessage` (client → server) then propagate back
+        // through component replication.
+        app.register_component::<PlayerCustomization>();
         // NetworkedPosition gets frame-level interpolation: lightyear
         // buffers each received tick into a `ConfirmedHistory` and lerps
         // toward the latest sample over the local frame, hiding the
@@ -110,6 +115,8 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<BeamCastBroadcast>()
             .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<CustomizeMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
     }
 }
 
@@ -131,6 +138,10 @@ pub struct PlayerInputMessage {
     pub movement: [f32; 2],
     /// Body yaw (camera-controlled) in radians.
     pub yaw: f32,
+    /// Camera aim pitch in radians, positive = looking up. Cosmetic
+    /// only — drives every observer's spine-lean rendering of this
+    /// player.
+    pub pitch: f32,
     pub jump: bool,
     pub casting: bool,
 }
@@ -299,6 +310,57 @@ pub struct NetworkedPlayer;
 )]
 pub struct NetworkOwner(pub u64);
 
+/// Per-player cosmetic state replicated to every peer. Drives the
+/// `RgbRecolorMaterial` tints + the visible character archetype. Edits
+/// originate client-side (the customization UI) and round-trip
+/// through `CustomizeMessage` → server → component replication so the
+/// server stays authoritative and every observer agrees on what each
+/// player looks like.
+///
+/// Colors are stored as `[f32; 3]` (linear-RGB) per slot so the
+/// component derives `Serialize`/`Deserialize` without depending on
+/// Bevy types in the wire format. 19 floats + 1 u32 per player —
+/// negligible bandwidth even at a high edit rate.
+#[derive(
+    Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize,
+)]
+pub struct PlayerCustomization {
+    pub body: [[f32; 3]; 3],
+    pub objects: [[f32; 3]; 3],
+    /// Per-slot mesh selection (class outfit, hair, face features).
+    /// See `player::parts` for the variant tables.
+    pub parts: crate::player::parts::PartSelection,
+}
+
+impl Default for PlayerCustomization {
+    fn default() -> Self {
+        // Mirrors `CharacterColors::default` in `player::recolor` and
+        // `PartSelection::default` in `player::parts`.
+        Self {
+            body: [
+                [0.85, 0.74, 0.62],
+                [0.45, 0.20, 0.55],
+                [0.10, 0.08, 0.12],
+            ],
+            objects: [
+                [0.65, 0.55, 0.30],
+                [0.20, 0.15, 0.25],
+                [0.90, 0.88, 0.80],
+            ],
+            parts: crate::player::parts::PartSelection::default(),
+        }
+    }
+}
+
+/// Client → server: "Set my customization to this." Server stamps the
+/// received value onto the matching `NetworkedPlayer`'s
+/// `PlayerCustomization` component; replication then ships it to every
+/// other connected client.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct CustomizeMessage {
+    pub customization: PlayerCustomization,
+}
+
 /// Server → all-clients broadcast of one player's per-tick beam cast.
 /// Replicating this as a Message instead of a per-player component because
 /// lightyear's component-update replication wasn't reliably propagating
@@ -337,6 +399,10 @@ pub struct NetworkedPosition {
     pub z: f32,
     /// Body rotation around the world Y axis, in radians.
     pub yaw: f32,
+    /// Camera aim pitch in radians, positive = looking up. Drives the
+    /// upper-body spine lean (`chest_joint` rotation) so observers
+    /// see the player tilting their torso with the aim direction.
+    pub pitch: f32,
     /// True while the broadcasting client is airborne (post-jump,
     /// falling, etc.). Drives the remote falling animation clip.
     pub airborne: bool,
@@ -384,6 +450,9 @@ fn lerp_networked_position(
         y: start.y + (end.y - start.y) * t,
         z: start.z + (end.z - start.z) * t,
         yaw: start.yaw + dyaw * t,
+        // Pitch is clamped at the source to [-π/2, π/2] (PITCH_LIMIT
+        // in the controller), so plain lerp doesn't need wrap-around.
+        pitch: start.pitch + (end.pitch - start.pitch) * t,
         // Discrete states snap at t >= 0.5 — partial interpolation of
         // booleans isn't meaningful and we'd rather show the new pose
         // promptly than blend through an intermediate.
@@ -399,6 +468,7 @@ impl NetworkedPosition {
             y: v.y,
             z: v.z,
             yaw: 0.0,
+            pitch: 0.0,
             airborne: false,
             casting: false,
         }
