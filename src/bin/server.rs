@@ -33,6 +33,11 @@ fn main() {
     app.add_plugins(wisp::spells::catalog::CatalogPlugin);
     app.add_plugins(wisp::spells::triggers::BodyTriggersPlugin);
     app.add_plugins(wisp::spells::explosion::ExplosionPlugin);
+    // DamagePlugin: hurtbox/hitbox contact damage system + DeathEvent
+    // routing (NetworkedPlayer -> respawn, anything else -> despawn).
+    // Required so AreaDamage effects on spells (e.g. explosion_small)
+    // actually apply hp changes.
+    app.add_plugins(wisp::spells::damage::DamagePlugin);
     info!("wisp server starting…");
     app.run();
 }

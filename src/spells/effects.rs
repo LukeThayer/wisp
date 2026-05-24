@@ -5,7 +5,9 @@ use avian3d::prelude::*;
 use bevy::ecs::system::SystemState;
 use bevy::prelude::*;
 
-use crate::spells::data::MarkerKind;
+use crate::spells::damage::{apply_aoe_damage, FalloffKind, Team};
+use crate::spells::data::{AreaShape, MarkerKind, TargetDef};
+use crate::spells::deliveries::resolve_origin;
 use crate::spells::engine::DeliveryTarget;
 use crate::spells::handlers::CastContext;
 use crate::spells::markers::Lantern;
@@ -92,4 +94,43 @@ fn apply_impulse(world: &mut World, entity: Entity, impulse: Vec3) {
     if let Ok(mut f) = forces.get_mut(entity) {
         f.apply_linear_impulse(impulse);
     }
+}
+
+/// Area damage centered on the cast's resolved origin, sized to the
+/// cast's `TargetDef::Area::Sphere` radius. Scaled by `captured_charge`
+/// when the cast carries one. Routes through `damage::apply_aoe_damage`
+/// which handles the spatial query + per-target damage + DeathEvent.
+///
+/// Player-fired spells default to `Team::Players` source (so casters
+/// don't blast their teammates today). When NPCs / hostile entities
+/// cast damaging spells later, plumb their team through `CastContext`.
+pub fn area_damage(
+    world: &mut World,
+    ctx: &CastContext,
+    base_damage: f32,
+    falloff: FalloffKind,
+) {
+    let TargetDef::Area { shape: AreaShape::Sphere { radius } } = &ctx.target else {
+        warn!(
+            "AreaDamage on cast {:?} requires TargetDef::Area::Sphere",
+            ctx.cast_id.0
+        );
+        return;
+    };
+    let Some((origin_pos, _)) = resolve_origin(world, ctx) else {
+        return;
+    };
+    let scale = ctx.captured_charge.unwrap_or(1.0);
+    let damage = base_damage * scale;
+    apply_aoe_damage(
+        world,
+        origin_pos,
+        *radius,
+        damage,
+        falloff,
+        // Caster is `ctx.player` — propagated by `dispatch_child_cast`
+        // through `original_caster`. None means orphan (caster gone).
+        if ctx.player == Entity::PLACEHOLDER { None } else { Some(ctx.player) },
+        Team::Players,
+    );
 }

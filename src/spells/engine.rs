@@ -580,6 +580,9 @@ fn run_effect(
         EffectDef::DespawnNearbyMatching { marker, radius } => {
             crate::spells::effects::despawn_nearby_matching(world, ctx, *marker, *radius);
         }
+        EffectDef::AreaDamage { base_damage, falloff } => {
+            crate::spells::effects::area_damage(world, ctx, *base_damage, *falloff);
+        }
         EffectDef::Custom { handler } => {
             let Some(handler_fn) = world
                 .resource::<HandlerRegistry>()

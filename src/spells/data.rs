@@ -329,8 +329,23 @@ pub enum EffectDef {
     Despawn,
     /// Despawn any entity within `radius` of the caster that carries `marker`.
     DespawnNearbyMatching { marker: MarkerKind, radius: f32 },
+    /// Area damage centered on the cast's resolved origin (e.g. an
+    /// `Impact` point for child casts). Walks every entity in the
+    /// spell's `TargetDef::Area` radius that has a `Hurtbox`, scaling
+    /// damage by `falloff`. `base_damage` is the value at distance 0;
+    /// effects scale by `captured_charge` if the cast carried one
+    /// (parent's stored charge propagates through child casts).
+    AreaDamage {
+        base_damage: f32,
+        #[serde(default = "default_falloff")]
+        falloff: crate::spells::damage::FalloffKind,
+    },
     /// Defer to bespoke code registered under this handler id.
     Custom { handler: HandlerId },
+}
+
+fn default_falloff() -> crate::spells::damage::FalloffKind {
+    crate::spells::damage::FalloffKind::Linear
 }
 
 // --- Markers ----------------------------------------------------------------

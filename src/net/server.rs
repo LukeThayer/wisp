@@ -18,11 +18,12 @@ use lightyear::prelude::{
 use avian3d::prelude::*;
 
 use crate::net::protocol::{
-    BeamCastBroadcast, BeamImpulseMessage, NetworkOwner, NetworkedId, NetworkedLantern,
-    NetworkedPlayer, NetworkedPortal, NetworkedPosition, NetworkedProp,
+    BeamCastBroadcast, BeamImpulseMessage, NetworkOwner, NetworkedHealth, NetworkedId,
+    NetworkedLantern, NetworkedPlayer, NetworkedPortal, NetworkedPosition, NetworkedProp,
     PickupLanternMessage, PlacePortalMessage, PlayerInputMessage, PropShape,
     SpawnBodyMessage, TestCube, ThrowLanternMessage,
 };
+use crate::spells::damage::{Hurtbox, Team, PLAYER_MAX_HP};
 use lightyear::prelude::MessageSender;
 use crate::physics::GameLayer;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
@@ -266,6 +267,11 @@ fn sync_networked_players(
                 NetworkedPosition::from_vec3(initial),
                 PlayerInputState::default(),
                 crate::net::protocol::PlayerCustomization::default(),
+                // Server-only Hurtbox + replicated NetworkedHealth.
+                // Clients render the HUD from NetworkedHealth; the
+                // server reads Hurtbox for the damage path.
+                Hurtbox::new(PLAYER_MAX_HP, Team::Players),
+                NetworkedHealth { hp: PLAYER_MAX_HP, max_hp: PLAYER_MAX_HP },
             ),
             // Server-authoritative dynamic body (Stage Q option b).
             // Same params as the client-side rig in `src/player/mod.rs`
