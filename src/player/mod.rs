@@ -7,7 +7,7 @@ pub mod recolor;
 pub mod visuals;
 
 use avian3d::prelude::*;
-use bevy::{color::palettes::css, prelude::*};
+use bevy::prelude::*;
 use bevy_enhanced_input::prelude::ContextActivity;
 
 use crate::input::{player_actions, radial_menu_actions, PlayerContext, RadialMenuContext};
@@ -82,15 +82,37 @@ pub struct LocalPlayer;
 /// Marker for the local player's wizard body root entity (carries the
 /// `SceneRoot`). Used by `visuals::propagate_self_body_render_layer` to
 /// scope its descendant walk — without it, every mesh on the local rig
-/// (including the wand tip) would land on the self-body render layer.
+/// would land on the self-body render layer.
 #[derive(Component)]
 pub struct LocalWizardBody;
+
+/// Marker for the local player's **viewmodel** body root — a duplicate
+/// of the character scene attached to the camera and rendered only on
+/// [`VIEWMODEL_LAYER`]. Standard FPS pattern: world body stays hidden
+/// in first-person, this mesh provides the "your own hands" view.
+///
+/// Loads `assets/character.glb` as a placeholder. To get true "hands
+/// cut off" visuals, author a hands-only GLB (e.g. trimmed to the wrist
+/// + finger bones) and swap the asset path in `spawn_player`.
+#[derive(Component)]
+pub struct LocalViewmodel;
 
 /// Render layer that the local player's body lives on. Main camera (layer
 /// 0) does NOT see it — keeps you out of your own mesh in first-person.
 /// Portal cameras include this layer, so you can place a portal pair and
-/// see your own character through it.
+/// see your own character through it. The 3rd-person customizer view
+/// also enables it.
 pub const SELF_BODY_LAYER: usize = 1;
+
+/// Render layer for the first-person **viewmodel** — a separate mesh
+/// (e.g. a hands-only model) attached to the camera and rendered ONLY
+/// by the 1st-person camera. Portal / customizer cameras exclude this
+/// layer so the viewmodel doesn't appear in the third-person view.
+///
+/// The main body mesh stays on [`SELF_BODY_LAYER`] (hidden from 1st-
+/// person); together with this layer that gives the classic FPS split:
+/// world body hidden, viewmodel hands visible.
+pub const VIEWMODEL_LAYER: usize = 2;
 
 /// Authorship of the player entity. `Local` for single-player; phase 2 will
 /// add a `Network(ClientId)` variant.
@@ -181,20 +203,43 @@ impl Default for PlayerSpawn {
 pub fn spawn_player(
     commands: &mut Commands,
     asset_server: &AssetServer,
-    meshes: &mut Assets<Mesh>,
-    materials: &mut Assets<StandardMaterial>,
     registry: &SpellRegistry,
     spawn: PlayerSpawn,
 ) -> Entity {
+    // LensAnchor is an invisible transform-only entity — the beam
+    // origin / aim for spells that read `PlayerRig.lens_anchor`. The
+    // gold wand cuboid that used to live here was removed in favor of
+    // a viewmodel hands mesh on the camera (see below).
     let lens_anchor = commands
         .spawn((
             LensAnchor,
-            Mesh3d(meshes.add(Cuboid::new(0.05, 0.05, 0.4))),
-            MeshMaterial3d(materials.add(StandardMaterial {
-                base_color: Color::from(css::GOLD),
-                ..default()
-            })),
+            Name::new("LensAnchor"),
             Transform::from_xyz(0.25, -0.3, -0.5),
+            Visibility::default(),
+        ))
+        .id();
+
+    // Viewmodel "hands": attaches a separate skinned mesh to the
+    // camera so the player sees their own hands in 1st-person without
+    // exposing the inside of the world body. Tagged `LocalViewmodel`
+    // so `visuals::propagate_self_body_render_layer` stamps every
+    // child mesh onto `VIEWMODEL_LAYER` — the layer the 1st-person
+    // camera renders and the portal / customizer cameras exclude.
+    //
+    // **Asset note**: this is hidden by default because the engine
+    // doesn't ship a hands-only GLB yet. Author one (trim the wizard
+    // model down to the wrist + finger bones, save as
+    // `assets/hands_viewmodel.glb`), swap the asset path below, and
+    // flip the Visibility to `Inherited`. The render-layer plumbing
+    // around this entity is already correct.
+    let viewmodel = commands
+        .spawn((
+            Name::new("LocalViewmodel"),
+            LocalViewmodel,
+            SceneRoot(asset_server.load(GltfAssetLabel::Scene(0).from_asset(spawn.visuals.scene_asset))),
+            Transform::from_xyz(0.0, -1.4, 0.0)
+                .with_rotation(Quat::from_rotation_y(spawn.visuals.body_yaw)),
+            Visibility::Hidden,
         ))
         .id();
 
@@ -207,13 +252,13 @@ pub fn spawn_player(
                 ..default()
             }),
             Transform::from_xyz(0.0, 0.7, 0.0),
-            // Layer 0 only by default (1st person — local body lives
-            // on SELF_BODY_LAYER and stays hidden). Toggled to include
-            // SELF_BODY_LAYER while the customizer is open so the
-            // player can see their character in 3rd person.
-            bevy::camera::visibility::RenderLayers::layer(0),
+            // 1st-person default: world (layer 0) + viewmodel layer.
+            // The world body stays on `SELF_BODY_LAYER` (hidden here
+            // so we don't render the inside of our own torso); portal
+            // and customizer cameras enable that layer.
+            bevy::camera::visibility::RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]),
         ))
-        .add_child(lens_anchor)
+        .add_children(&[lens_anchor, viewmodel])
         .id();
 
     // The local rig's wizard body is the visible third-person mesh of

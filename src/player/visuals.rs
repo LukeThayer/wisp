@@ -5,7 +5,9 @@ use bevy::{gltf::Gltf, mesh::skinning::SkinnedMesh, prelude::*};
 use bevy_enhanced_input::prelude::Action;
 
 use crate::input::CycleCharacter;
-use crate::player::{Facing, LocalPlayer, LocalWizardBody, Player, SELF_BODY_LAYER};
+use crate::player::{
+    Facing, LocalPlayer, LocalViewmodel, LocalWizardBody, Player, SELF_BODY_LAYER, VIEWMODEL_LAYER,
+};
 
 /// Available characters the local player can cycle through. Each variant
 /// points at a `.glb` produced by `tools/character/port_character.py` and
@@ -309,16 +311,20 @@ pub fn disable_skinned_mesh_culling(
     }
 }
 
-/// Walk newly-spawned mesh entities; if any ancestor is `LocalWizardBody`,
-/// stamp `RenderLayers::layer(SELF_BODY_LAYER)`. Bevy does NOT auto-
-/// propagate `RenderLayers` from parent to child, so without this every
-/// mesh inside the gltf scene would default to layer 0 and re-appear in
-/// the main camera (defeating the whole point of the layer filter).
+/// Walk newly-spawned mesh entities. If an ancestor is the
+/// [`LocalWizardBody`] (third-person world body), stamp
+/// [`SELF_BODY_LAYER`]. If an ancestor is the [`LocalViewmodel`]
+/// (first-person hands), stamp [`VIEWMODEL_LAYER`]. Otherwise leave it
+/// on the default layer 0.
 ///
-/// The same descendant walk handles scene-swap: when `swap_local_body_scene`
-/// replaces the SceneRoot handle, the new gltf spawns fresh meshes
-/// without a `RenderLayers` component — `Added` fires for them and we
-/// stamp the layer onto each.
+/// Bevy does NOT auto-propagate `RenderLayers` from parent to child,
+/// so without this every mesh inside a gltf scene would default to
+/// layer 0 and appear in the wrong cameras (defeating the layer split).
+///
+/// The same descendant walk handles scene-swap: when
+/// `swap_local_body_scene` replaces the SceneRoot handle, the new gltf
+/// spawns fresh meshes without a `RenderLayers` component — `Added`
+/// fires for them and we stamp the layer onto each.
 pub fn propagate_self_body_render_layer(
     mut commands: Commands,
     new_meshes: Query<
@@ -330,10 +336,17 @@ pub fn propagate_self_body_render_layer(
     >,
     parents: Query<&ChildOf>,
     body_marker: Query<(), With<LocalWizardBody>>,
+    viewmodel_marker: Query<(), With<LocalViewmodel>>,
 ) {
     for entity in &new_meshes {
         let mut current = entity;
         loop {
+            if viewmodel_marker.contains(current) {
+                commands
+                    .entity(entity)
+                    .insert(RenderLayers::layer(VIEWMODEL_LAYER));
+                break;
+            }
             if body_marker.contains(current) {
                 commands
                     .entity(entity)

@@ -93,7 +93,7 @@ pub fn apply_rotation(
         (With<PlayerCamera>, Without<Player>),
     >,
 ) {
-    use crate::player::SELF_BODY_LAYER;
+    use crate::player::{SELF_BODY_LAYER, VIEWMODEL_LAYER};
     let (cam_transform, cam_layers) = &mut *cam;
     // Stage Q: `LightyearAvianPlugin` disables avian's
     // `PhysicsTransformPlugin` and replaces it with its own sync. We
@@ -116,15 +116,18 @@ pub fn apply_rotation(
         let orbit_rot = Quat::from_axis_angle(Vec3::Y, orbit.yaw);
         cam_transform.translation = orbit_rot * CAM_LOCAL_REST;
         cam_transform.look_at(LOOK_AT, Vec3::Y);
-        // Include the self-body render layer so we can actually see
-        // our character. In 1st person this layer is hidden so the
-        // camera doesn't end up rendering the inside of our own head.
+        // 3rd-person customizer view: world (0) + own body, but NOT
+        // the viewmodel layer (viewmodel hands are a 1st-person
+        // artifact; they shouldn't appear floating in front of the
+        // orbit camera).
         **cam_layers = bevy::camera::visibility::RenderLayers::from_layers(&[0, SELF_BODY_LAYER]);
     } else {
         // 1st person: head height, no offset, pitch from facing.
+        // World (0) + viewmodel only. Own body stays on SELF_BODY_LAYER
+        // (hidden here so we don't render the inside of our own torso).
         cam_transform.translation = Vec3::new(0.0, 0.7, 0.0);
         cam_transform.rotation = Quat::from_axis_angle(Vec3::X, facing.pitch);
-        **cam_layers = bevy::camera::visibility::RenderLayers::layer(0);
+        **cam_layers = bevy::camera::visibility::RenderLayers::from_layers(&[0, VIEWMODEL_LAYER]);
     }
 }
 

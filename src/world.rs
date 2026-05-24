@@ -37,8 +37,6 @@ fn spawn_world(
     spawn_player(
         &mut commands,
         &asset_server,
-        &mut meshes,
-        &mut materials,
         &registry,
         PlayerSpawn::default(),
     );
