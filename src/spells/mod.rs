@@ -24,6 +24,7 @@ use serde::Deserialize;
 pub mod bodies;
 pub mod catalog;
 pub mod convex_lens;
+pub mod damage;
 pub mod data;
 pub mod deliveries;
 pub mod effects;

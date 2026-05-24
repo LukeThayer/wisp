@@ -54,6 +54,11 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<NetworkedLantern>();
         app.register_component::<NetworkedPortal>();
         app.register_component::<NetworkedId>();
+        // NetworkedHealth replicates current + max hp on any entity with
+        // a Hurtbox. Server is authoritative — clients only read this
+        // for HUD / overhead bars. No interpolation: hp is discrete and
+        // damage events feel best when they snap rather than slide.
+        app.register_component::<NetworkedHealth>();
 
         // Stage Q: register avian's authoritative physics components for
         // prediction + linear interpolation. We keep them DISABLED by
@@ -386,6 +391,16 @@ pub struct BeamCastBroadcast {
     Component, Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize,
 )]
 pub struct NetworkedId(pub u64);
+
+/// Replicated health snapshot. Mirrors `Hurtbox.hp` / `Hurtbox.max_hp`
+/// on the server (Hurtbox itself is server-only); clients read this for
+/// HUDs and overhead bars. Discrete enough that interpolation would
+/// blur damage feedback, so no `add_interpolation_with`.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkedHealth {
+    pub hp: f32,
+    pub max_hp: f32,
+}
 
 /// Serializable world pose. Bevy's `Transform` doesn't implement serde by
 /// default, so the protocol carries this wrapper and a client-side system
