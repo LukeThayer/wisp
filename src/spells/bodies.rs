@@ -12,7 +12,7 @@ use serde::Deserialize;
 
 use crate::physics::GameLayer;
 use crate::spells::data::{BodyTemplateId, MarkerKind};
-use crate::spells::markers::Lantern;
+use crate::spells::markers::{FrostSpike, Lantern, RollingGlacier};
 use crate::spells::portal::PortalTraveler;
 
 #[derive(Asset, TypePath, Deserialize, Clone, Debug)]
@@ -61,10 +61,10 @@ fn default_alpha() -> f32 {
 }
 
 impl ColorDef {
-    fn to_color(self) -> Color {
+    pub fn to_color(self) -> Color {
         Color::srgba(self.r, self.g, self.b, self.a)
     }
-    fn to_linear(self) -> LinearRgba {
+    pub fn to_linear(self) -> LinearRgba {
         LinearRgba::new(self.r, self.g, self.b, self.a)
     }
 }
@@ -184,6 +184,23 @@ pub fn spawn_body(
             }
             MarkerKind::PortalTraveler => {
                 entity.insert(PortalTraveler);
+            }
+            MarkerKind::RollingGlacier => {
+                entity.insert(RollingGlacier::default());
+            }
+            MarkerKind::FrostSpike => {
+                // Body-spawner path is currently unused — `frost_spire`
+                // bypasses this and spawns its own configured spike in
+                // `spells::ice::handle_frost_spire`. Placeholder zeros
+                // are safe: 0 damage means `attach_spike_hitbox`'s
+                // Hitbox is a no-op; 0 rise_remaining keeps the body
+                // in whatever state the body def chose.
+                entity.insert(FrostSpike {
+                    lifetime: 180.0,
+                    rise_remaining: 0.0,
+                    damage: 0.0,
+                    caster: None,
+                });
             }
         }
     }

@@ -79,6 +79,11 @@ const BEAM_MAX_RANGE: f32 = 30.0;
 pub const IRIS_MAX_CHARGE: f32 = 3.0;
 const IRIS_BURST_DURATION: f32 = 0.12;
 const IRIS_BURST_IMPULSE: f32 = 150.0;
+/// Damage per unit of captured charge. Iris caps at `IRIS_MAX_CHARGE = 3.0`,
+/// so a full release hits for ~3 × this value. Tuned alongside the impulse
+/// number so a fully-stoked iris feels punchy without one-shotting a
+/// `Hurtbox` at `PLAYER_MAX_HP`.
+const IRIS_BURST_DAMAGE: f32 = 22.0;
 const IRIS_BURST_MIN: f32 = 0.05;
 const IRIS_BURST_RADIUS: f32 = 0.07;
 
@@ -146,6 +151,7 @@ fn apply_burst_on_release(
                     direction: [beam_dir.x, beam_dir.y, beam_dir.z],
                     range: BEAM_MAX_RANGE,
                     magnitude: IRIS_BURST_IMPULSE * charge,
+                    damage: IRIS_BURST_DAMAGE * charge,
                 });
             }
         }

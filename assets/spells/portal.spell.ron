@@ -8,6 +8,7 @@
 SpellDef(
     id: "portal",
     label: "Portal",
+    tint: Some((r: 0.7, g: 0.4, b: 1.0)),
     casts: [
         (
             id: "portal.place_primary",

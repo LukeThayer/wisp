@@ -9,6 +9,7 @@
 SpellDef(
     id: "stone_toss",
     label: "Stone Toss",
+    tint: Some((r: 0.7, g: 0.55, b: 0.35)),
     casts: [
         (
             id: "stone_toss.throw",

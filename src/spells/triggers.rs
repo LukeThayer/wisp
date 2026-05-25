@@ -37,6 +37,7 @@ impl Plugin for BodyTriggersPlugin {
             (
                 attach_collision_events,
                 enqueue_pending_collision_triggers,
+                tick_timeout_triggers,
                 // Exclusive system: only run when there's actual work.
                 // Bevy syncs the schedule when reaching an exclusive
                 // system, so an unconditionally-scheduled empty
@@ -78,6 +79,9 @@ pub struct BodyTriggers {
     /// double-dispatch (avian emits a `CollisionStart` per surface and
     /// we only want one explosion per fireball).
     pub fired: bool,
+    /// Seconds elapsed since the body was spawned. Driven by
+    /// `tick_timeout_triggers` for `OnTimeout` event handling.
+    pub elapsed: f32,
 }
 
 /// Queued child-cast dispatches. The collision observer can't call
@@ -118,7 +122,11 @@ fn attach_collision_events(
 
 /// Drain `CollisionStart` messages. For each pair involving an entity
 /// with `BodyTriggers`, walk its event list and push a `PendingChildCast`
-/// for each `OnCollision` hook. Mark the body as fired to one-shot it.
+/// for each `OnCollision` hook. The body is despawned (one-shot) only
+/// if at least one OnCollision actually fired — a body whose triggers
+/// are all `OnTimeout` keeps living until its timer is up. Without this
+/// guard a rolling-glacier ball (OnTimeout 8s) was being despawned on
+/// the first floor contact instead of getting to roll.
 fn enqueue_pending_collision_triggers(
     mut collisions: MessageReader<CollisionStart>,
     mut bodies: Query<(Entity, &GlobalTransform, &mut BodyTriggers)>,
@@ -135,13 +143,14 @@ fn enqueue_pending_collision_triggers(
             if triggers.fired {
                 continue;
             }
-            triggers.fired = true;
             let origin = transform.translation();
+            let mut fired_collision = false;
             for event in &triggers.events {
                 if let BodyEventTrigger::OnCollision {
                     triggers: TriggerSpec { spell_id, cast_id },
                 } = event
                 {
+                    fired_collision = true;
                     pending.0.push(PendingChildCast {
                         spell_id: spell_id.clone(),
                         cast_id: cast_id.clone(),
@@ -153,10 +162,55 @@ fn enqueue_pending_collision_triggers(
                     });
                 }
             }
-            // One-shot: despawn the triggering body. If a use case
-            // wants the body to survive its trigger (e.g. a sticky
-            // grenade with multiple events), add a "persistent" flag to
-            // BodyTriggers.
+            if fired_collision {
+                triggers.fired = true;
+                // One-shot: despawn the triggering body. If a use case
+                // wants the body to survive its trigger (e.g. a sticky
+                // grenade with multiple events), add a "persistent" flag to
+                // BodyTriggers.
+                commands.entity(entity).despawn();
+            }
+        }
+    }
+}
+
+/// Drive `OnTimeout` triggers: tick each `BodyTriggers.elapsed` and
+/// fire the first OnTimeout whose `secs` has elapsed (one-shot via
+/// `fired`). The body is despawned when an OnTimeout fires, mirroring
+/// the OnCollision path's one-shot behaviour.
+fn tick_timeout_triggers(
+    time: Res<Time>,
+    mut bodies: Query<(Entity, &GlobalTransform, &mut BodyTriggers)>,
+    mut pending: ResMut<PendingChildCasts>,
+    mut commands: Commands,
+) {
+    let dt = time.delta_secs();
+    for (entity, transform, mut triggers) in &mut bodies {
+        if triggers.fired {
+            continue;
+        }
+        triggers.elapsed += dt;
+        let origin = transform.translation();
+        let mut due: Option<TriggerSpec> = None;
+        for event in &triggers.events {
+            if let BodyEventTrigger::OnTimeout { secs, triggers: spec } = event {
+                if triggers.elapsed >= *secs {
+                    due = Some(spec.clone());
+                    break;
+                }
+            }
+        }
+        if let Some(TriggerSpec { spell_id, cast_id }) = due {
+            triggers.fired = true;
+            pending.0.push(PendingChildCast {
+                spell_id,
+                cast_id,
+                origin,
+                original_caster: triggers.original_caster,
+                captured_charge: triggers.captured_charge,
+                chain_depth: triggers.chain_depth.saturating_add(1),
+                caused_by: triggers.caused_by.clone(),
+            });
             commands.entity(entity).despawn();
         }
     }

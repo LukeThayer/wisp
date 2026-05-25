@@ -1,7 +1,9 @@
 pub mod customization;
 pub mod health;
 pub mod hud;
+pub mod inventory;
 pub mod radial_menu;
+pub mod weapons_hud;
 
 use bevy::prelude::*;
 
@@ -11,6 +13,8 @@ impl Plugin for UiPlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins(customization::CustomizationPlugin)
             .add_plugins(health::HealthHudPlugin)
+            .add_plugins(inventory::InventoryPlugin)
+            .add_plugins(weapons_hud::WeaponsHudPlugin)
             .init_resource::<radial_menu::RadialCursor>()
             .add_observer(radial_menu::on_open_radial)
             .add_systems(Startup, hud::spawn_hud)

@@ -9,6 +9,7 @@
 SpellDef(
     id: "slam_pulse",
     label: "Slam Pulse",
+    tint: Some((r: 0.45, g: 0.85, b: 1.0)),
     casts: [
         (
             id: "slam_pulse.slam",

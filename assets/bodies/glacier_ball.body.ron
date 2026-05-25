@@ -1,0 +1,30 @@
+// Glacier ball: a heavy rolling sphere of ice. Friction is low so the
+// ball keeps momentum once thrown; mass is high so impacts hit hard
+// (the bespoke server system reads this for the contact-damage scale).
+// Marker `RollingGlacier` selects the server-side trail/expiry logic
+// in `src/spells/ice.rs`. `PortalTraveler` lets the ball go through
+// portal pairs like other dynamic props.
+BodyDef(
+    id: "glacier_ball",
+    mesh: Sphere(radius: 0.32),
+    material: (
+        base_color: (r: 0.55, g: 0.85, b: 1.0),
+        emissive:   (r: 0.5,  g: 1.1,  b: 1.8),
+        roughness: 0.15,
+    ),
+    physics: (
+        body: Dynamic,
+        collider: Sphere(radius: 0.32),
+        mass: 6.0,
+        friction: 0.2,
+        linear_damping: 0.05,
+        angular_damping: 0.05,
+        restitution: 0.4,
+    ),
+    light: Some((
+        color: (r: 0.55, g: 0.85, b: 1.0),
+        intensity: 28000.0,
+        range: 9.0,
+    )),
+    markers: [PortalTraveler, RollingGlacier],
+)

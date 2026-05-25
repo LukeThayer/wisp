@@ -1,0 +1,4 @@
+# Throw a glacier ball forward from (0, 1.5, 5) along -Z. Then idle so
+# the trail/expiry systems get plenty of time to run.
+0.5 throw_glacier 0 1.5 5  0 0 -9
+9.0 exit

@@ -99,7 +99,7 @@ impl Material for PortalMaterial {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, Eq, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Copy, Clone, PartialEq, Eq, Hash, Debug, serde::Serialize, serde::Deserialize)]
 pub enum PortalSlot {
     Primary,
     Secondary,
@@ -140,8 +140,22 @@ pub const PORTAL_RADIUS: f32 = 1.4;
 const PORTAL_THICKNESS: f32 = 0.04;
 const AIR_PORTAL_DISTANCE: f32 = 2.5;
 const PORTAL_RAYCAST_RANGE: f32 = 15.0;
-const HORIZONTAL_NORMAL_DOT_Y: f32 = 0.7;
-const HORIZONTAL_DISC_DEPTH: f32 = 2.0;
+pub const HORIZONTAL_NORMAL_DOT_Y: f32 = 0.7;
+pub const HORIZONTAL_DISC_DEPTH: f32 = 2.0;
+/// Half-depth of the slab in front of and behind a *surface* (wall)
+/// portal in which approaching travelers get the `Default` layer
+/// dropped from their collision filter. Without this, a fast-moving
+/// prop (fireball, glacier) collides with the wall behind the portal
+/// before the server-side teleport detects the sign-flip and warps it
+/// across — and any `OnCollision`-triggered body (fireball →
+/// explosion) fires on the wrong wall.
+///
+/// Sized to give at least one frame of pre-detection at typical
+/// projectile speeds: a 30 m/s prop on a 60 Hz tick moves 0.5 m per
+/// frame, so 0.8 m leaves a safety margin without making the slab so
+/// thick that nearby unrelated geometry inside the disc footprint
+/// gets pass-through behaviour.
+pub const SURFACE_DISC_DEPTH: f32 = 0.8;
 // Stage Q.5b retired the local-only teleport systems (see the
 // `process_teleports` / `process_traveler_teleports` comment further
 // down). These constants belong to those systems; we keep them so
@@ -321,40 +335,128 @@ pub fn disc_rotation(normal: Vec3) -> Quat {
     Quat::from_mat3(&Mat3::from_cols(x_axis, y_axis, z_axis))
 }
 
-fn portal_virtual_transform(
+/// True when the two portals' outward normals point in roughly opposite
+/// directions (e.g., the canonical Portal-game scenario of opposite
+/// walls facing each other). In that case the natural
+/// `T = exit_rot * entry_inv` transformation introduces a world-X mirror,
+/// and we cancel it with an `X_local` reflection. For parallel or
+/// perpendicular pairs (ground-to-ground, wall-to-floor, etc.) the
+/// natural math already gives the right behavior — applying the same
+/// reflection would *introduce* an unwanted mirror.
+fn anti_parallel_normals(entry: &Transform, exit: &Transform) -> bool {
+    let na = (entry.rotation * Vec3::Y).normalize_or_zero();
+    let nb = (exit.rotation * Vec3::Y).normalize_or_zero();
+    na.dot(nb) < -0.5
+}
+
+/// Where the player's body should land after walking through the portal:
+/// **in front of** the exit (on the room side, along the exit's outward
+/// normal), with their forward rotated through `rot_flip` so they emerge
+/// facing out of the disc rather than back into it.
+///
+/// Y_local + Z_local of position are preserved; X_local is reflected
+/// *only* for anti-parallel portal pairs (where the natural transform
+/// would otherwise mirror across the world vertical axis). X-only is a
+/// reflection (improper), so it's applied component-wise rather than as
+/// a `pos_flip` Quat.
+pub fn portal_virtual_transform(
     player_tf: Transform,
     entry: &Transform,
     exit: &Transform,
 ) -> Transform {
-    let pos_flip = Quat::from_rotation_y(core::f32::consts::PI);
     let rot_flip = Quat::from_rotation_z(core::f32::consts::PI);
+    let needs_x_flip = anti_parallel_normals(entry, exit);
 
     let entry_inv_rot = entry.rotation.inverse();
-    let local_pos = entry_inv_rot * (player_tf.translation - entry.translation);
+    let mut local_pos = entry_inv_rot * (player_tf.translation - entry.translation);
+    if needs_x_flip {
+        local_pos.x = -local_pos.x;
+    }
+    // One-sided ground exit: the -Y local side is buried in the floor.
+    // Force emergence on the accessible +Y side so a player entering
+    // a floating portal from the back still lands above the ground
+    // disc rather than below it.
+    let exit_normal_world = (exit.rotation * Vec3::Y).normalize_or_zero();
+    if exit_normal_world.y >= HORIZONTAL_NORMAL_DOT_Y {
+        local_pos.y = local_pos.y.abs();
+    }
     let local_forward = rot_flip * (entry_inv_rot * (player_tf.rotation * Vec3::NEG_Z));
 
-    let virtual_pos = exit.translation + exit.rotation * (pos_flip * local_pos);
+    let virtual_pos = exit.translation + exit.rotation * local_pos;
     let forward = exit.rotation * local_forward;
 
+    let mut tf = Transform::from_translation(virtual_pos);
+    tf.look_to(forward, fallback_up(forward, &player_tf));
+    tf
+}
+
+/// Where the *render-to-texture portal camera* should sit + look:
+/// **behind** the exit (on the wall side), looking THROUGH the exit disc
+/// into the room the player would emerge into. Pair with an oblique
+/// near-clip plane = exit disc plane to clip out anything between the
+/// camera and the exit (the wall back, the entry disc, the room behind
+/// the player) so only the world beyond the exit appears in the portal
+/// texture.
+///
+/// Position is the mirror image of [`portal_virtual_transform`]'s
+/// position across the exit disc plane — Y_local is always flipped
+/// (manual reflection — that's what puts the camera *behind* exit
+/// instead of in front). X_local is flipped *only* for anti-parallel
+/// pairs, matching the player teleport. For parallel / perpendicular
+/// pairs (ground-to-ground, wall-to-floor, …) the unconditional X flip
+/// would introduce a world-X mirror that ground portals don't want.
+pub fn portal_camera_transform(
+    player_tf: Transform,
+    entry: &Transform,
+    exit: &Transform,
+) -> Transform {
+    let rot_flip = Quat::from_rotation_z(core::f32::consts::PI);
+    let needs_x_flip = anti_parallel_normals(entry, exit);
+
+    let entry_inv_rot = entry.rotation.inverse();
+    let mut local_pos = entry_inv_rot * (player_tf.translation - entry.translation);
+    local_pos.y = -local_pos.y;
+    if needs_x_flip {
+        local_pos.x = -local_pos.x;
+    }
+    // One-sided ground exit: the camera always belongs *behind* the
+    // disc (below the floor) so it renders the room above. Without
+    // this clamp, looking at the floating entry from behind puts the
+    // camera above the floor and the through-view sees the closed
+    // back of the disc instead of the destination world.
+    let exit_normal_world = (exit.rotation * Vec3::Y).normalize_or_zero();
+    if exit_normal_world.y >= HORIZONTAL_NORMAL_DOT_Y {
+        local_pos.y = -local_pos.y.abs();
+    }
+    let local_forward = rot_flip * (entry_inv_rot * (player_tf.rotation * Vec3::NEG_Z));
+
+    let virtual_pos = exit.translation + exit.rotation * local_pos;
+    let forward = exit.rotation * local_forward;
+
+    let mut tf = Transform::from_translation(virtual_pos);
+    tf.look_to(forward, fallback_up(forward, &player_tf));
+    tf
+}
+
+fn fallback_up(forward: Vec3, player_tf: &Transform) -> Vec3 {
     let world_up = Vec3::Y;
-    let up_ref = if forward.cross(world_up).length_squared() > 1e-6 {
+    if forward.cross(world_up).length_squared() > 1e-6 {
         world_up
     } else {
         let player_fwd = player_tf.rotation * Vec3::NEG_Z;
         Vec3::new(player_fwd.x, 0.0, player_fwd.z)
             .try_normalize()
             .unwrap_or(Vec3::X)
-    };
-
-    let mut tf = Transform::from_translation(virtual_pos);
-    tf.look_to(forward, up_ref);
-    tf
+    }
 }
 
 fn update_portal_cameras(
     player_cam: Single<&GlobalTransform, (With<PlayerCamera>, With<LocalPlayer>)>,
     portals: Query<(Entity, &Portal, &GlobalTransform)>,
-    mut cameras: Query<(&PortalCamera, &mut Transform, &mut Camera), Without<Portal>>,
+    mut cameras: Query<
+        (&PortalCamera, &mut Transform, &mut Camera, &mut Projection),
+        Without<Portal>,
+    >,
 ) {
     let mut primary: Option<(Entity, Transform)> = None;
     let mut secondary: Option<(Entity, Transform)> = None;
@@ -368,7 +470,7 @@ fn update_portal_cameras(
     let pair_ready = primary.is_some() && secondary.is_some();
     let player_tf = player_cam.compute_transform();
 
-    for (portal_cam, mut cam_tf, mut camera) in &mut cameras {
+    for (portal_cam, mut cam_tf, mut camera, mut projection) in &mut cameras {
         if !pair_ready {
             if camera.is_active {
                 camera.is_active = false;
@@ -386,9 +488,25 @@ fn update_portal_cameras(
             continue;
         };
 
-        *cam_tf = portal_virtual_transform(player_tf, entry, exit);
+        *cam_tf = portal_camera_transform(player_tf, entry, exit);
         if !camera.is_active {
             camera.is_active = true;
+        }
+
+        // Oblique near-clip plane = exit disc plane (Lengyel 2005). Anything
+        // closer to the camera than the disc gets clipped out — without
+        // this, the wall back, the entry disc, and any objects standing
+        // between the camera and the exit leak into the portal texture and
+        // ride along with parallax instead of being hidden by the disc.
+        // The plane is expressed in the camera's view space; normal points
+        // away from the camera (Bevy convention).
+        if let Projection::Perspective(p) = &mut *projection {
+            let exit_normal_world = exit.rotation * Vec3::Y;
+            let cam_rot_inv = cam_tf.rotation.inverse();
+            let normal_view = (cam_rot_inv * exit_normal_world).normalize();
+            let q_view = cam_rot_inv * (exit.translation - cam_tf.translation);
+            let w = -normal_view.dot(q_view);
+            p.near_clip_plane = normal_view.extend(w);
         }
     }
 }

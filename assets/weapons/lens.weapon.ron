@@ -1,0 +1,13 @@
+// Lens: the focusing tool of the lantern-magic family. Channels through
+// placed lanterns to project a beam (convex_lens), bursts the stored
+// power in a single shot (iris), or scatters fresh lanterns into the
+// world to act as new light sources (lantern).
+WeaponDef(
+    id: "lens",
+    label: "Lens",
+    spells: [
+        "convex_lens",
+        "iris",
+        "lantern",
+    ],
+)

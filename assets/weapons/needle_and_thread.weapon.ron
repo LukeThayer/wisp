@@ -1,0 +1,10 @@
+// Needle and thread: stitches space — primary and secondary casts place
+// the two ends of a portal pair.
+WeaponDef(
+    id: "needle_and_thread",
+    label: "Needle & Thread",
+    spells: [
+        "handheld_portal",
+        "portal",
+    ],
+)

@@ -6,6 +6,7 @@
 SpellDef(
     id: "convex_lens",
     label: "Convex Lens",
+    tint: Some((r: 1.0, g: 0.85, b: 0.4)),
     casts: [
         (
             id: "convex_lens.beam",

@@ -15,7 +15,8 @@ use crate::physics::GameLayer;
 use crate::spells::convex_lens::LensPower;
 use crate::spells::iris::IrisBurst;
 use crate::spells::portal::{PortalLockout, PrevPos};
-use crate::spells::{ActiveSpell, CastState, EquippedSpells, PrevActionSnapshot, SpellId, SpellRegistry};
+use crate::spells::{ActiveSpell, CastState, PrevActionSnapshot, SpellId, SpellRegistry};
+use crate::weapons::{ActiveWeaponSlot, EquippedWeapons};
 
 pub use controller::{Facing, Player, PlayerCamera};
 
@@ -44,6 +45,7 @@ impl Plugin for PlayerPlugin {
                 (
                     controller::apply_rotation,
                     controller::cursor_grab,
+                    controller::apply_teleport_snaps.before(controller::apply_rotation),
                     controller::sync_local_player_from_server,
                     controller::track_local_velocity.after(controller::sync_local_player_from_server),
                     visuals::apply_character_change,
@@ -167,7 +169,8 @@ impl Default for CharacterVisuals {
 pub struct PlayerSpawn {
     pub position: Vec3,
     pub yaw: f32,
-    pub loadout: EquippedSpells,
+    pub loadout: EquippedWeapons,
+    pub active_slot: ActiveWeaponSlot,
     pub initial_spell: SpellId,
     pub visuals: CharacterVisuals,
     pub owner: PlayerOwner,
@@ -182,7 +185,8 @@ impl Default for PlayerSpawn {
         Self {
             position: Vec3::new(0.0, 1.5, 5.0),
             yaw: 0.0,
-            loadout: EquippedSpells::default(),
+            loadout: EquippedWeapons::starter(),
+            active_slot: ActiveWeaponSlot::default(),
             initial_spell: SpellId::new("convex_lens"),
             visuals: CharacterVisuals::default(),
             owner: PlayerOwner::Local,
@@ -288,6 +292,7 @@ pub fn spawn_player(
             },
             (
                 spawn.loadout,
+                spawn.active_slot,
                 ActiveSpell(spawn.initial_spell.clone()),
                 LensPower::default(),
                 IrisBurst::default(),

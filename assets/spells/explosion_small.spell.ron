@@ -20,6 +20,7 @@
 SpellDef(
     id: "explosion_small",
     label: "Explosion (small)",
+    tint: Some((r: 1.0, g: 0.4, b: 0.1)),
     casts: [
         (
             id: "explosion_small.boom",

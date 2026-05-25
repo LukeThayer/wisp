@@ -148,7 +148,7 @@ impl Plugin for DamagePlugin {
 ///
 /// Returns true iff this hit was lethal. Callers can use the return
 /// value to short-circuit follow-up effects, but most don't need to.
-fn apply_damage_to_hurtbox(
+pub fn apply_damage_to_hurtbox(
     target: Entity,
     hurtbox: &mut Hurtbox,
     net_hp: Option<Mut<NetworkedHealth>>,

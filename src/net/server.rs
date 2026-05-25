@@ -18,12 +18,16 @@ use lightyear::prelude::{
 use avian3d::prelude::*;
 
 use crate::net::protocol::{
-    BeamCastBroadcast, BeamImpulseMessage, NetworkOwner, NetworkedHealth, NetworkedId,
-    NetworkedLantern, NetworkedPlayer, NetworkedPortal, NetworkedPosition, NetworkedProp,
-    PickupLanternMessage, PlacePortalMessage, PlayerInputMessage, PropShape,
-    SpawnBodyMessage, TestCube, ThrowLanternMessage,
+    BeamCastBroadcast, BeamImpulseMessage, ChargeStateBroadcast, ChargeStateMessage,
+    EquipWeaponsMessage, HandheldPortal, HoldPortalMessage, NetworkOwner, NetworkedHealth,
+    NetworkedId, NetworkedLantern, NetworkedPlayer, NetworkedPortal, NetworkedPosition,
+    NetworkedProp, PickupLanternMessage, PlacePortalMessage, PlayerInputMessage, PropShape,
+    SpawnBodyMessage, TeleportSnap, TestCube, ThrowLanternMessage,
 };
-use crate::spells::damage::{Hurtbox, Team, PLAYER_MAX_HP};
+use crate::weapons::{ActiveWeaponSlot, EquippedWeapons, WeaponId};
+use crate::spells::damage::{
+    apply_damage_to_hurtbox, DeathEvent, Hurtbox, Team, PLAYER_MAX_HP,
+};
 use lightyear::prelude::MessageSender;
 use crate::physics::GameLayer;
 use crate::net::{default_server_addr, ProtocolPlugin, NETCODE_KEY, PROTOCOL_ID, TICK_HZ};
@@ -45,6 +49,7 @@ impl Plugin for ServerNetPlugin {
         })
         .init_resource::<NetworkedIdAlloc>()
         .init_resource::<ClientPlayerMap>()
+        .init_resource::<HeldPortalRegistry>()
         .add_systems(Startup, (spawn_server, spawn_test_cube, spawn_arena))
         .add_systems(
             Update,
@@ -54,11 +59,17 @@ impl Plugin for ServerNetPlugin {
                 drain_player_inputs,
                 drain_customize_messages,
                 apply_beam_impulses,
+                relay_charge_states,
+                drain_equip_messages,
                 handle_throw_lantern,
                 handle_pickup_lantern,
                 handle_place_portal,
+                handle_hold_portal,
                 handle_spawn_body,
+                update_networked_player_falling,
+                update_networked_prop_falling,
                 server_portal_teleport,
+                update_prev_portal_pose.after(server_portal_teleport),
                 sync_player_positions,
                 sync_prop_positions,
                 sync_lantern_positions,
@@ -104,6 +115,15 @@ impl NetworkedIdAlloc {
     }
 }
 
+/// Maps `(client_id, PortalSlot) → handheld portal Entity`. Lets
+/// `handle_hold_portal` route per-tick updates to the existing portal
+/// (rather than respawning each frame) and gives `despawn_disconnected_players`
+/// an O(1) cleanup target.
+#[derive(Resource, Default)]
+pub struct HeldPortalRegistry {
+    by_owner_slot: HashMap<(u64, crate::spells::portal::PortalSlot), Entity>,
+}
+
 /// Server-side previous-position tracker for portal-traveler entities
 /// (`NetworkedProp`, `NetworkedLantern`). Local to the server; not
 /// replicated. Mirrors `spells::portal::PrevPos` from the client.
@@ -116,6 +136,20 @@ struct ServerPrevPos(Option<Vec3>);
 /// `spells::portal::PortalLockout`.
 #[derive(Component, Default)]
 struct ServerPortalLockout(HashSet<Entity>);
+
+/// Previous-frame world pose of a `NetworkedPortal`. Required for the
+/// "portal sweeps over stationary traveler" case in
+/// `server_portal_teleport`: without this, prev/curr crossing math
+/// both use the current portal pose, so a moving handheld portal
+/// passing across a body produces zero along-axis delta and the
+/// teleport never fires. Refreshed at the end of each tick by
+/// `update_prev_portal_pose`; initial value is set to the spawn pose
+/// (so the first frame can't trigger a phantom crossing).
+#[derive(Component)]
+struct ServerPrevPortalPose {
+    translation: Vec3,
+    rotation: Quat,
+}
 
 fn spawn_server(mut commands: Commands, bind: Res<ServerBind>) {
     let config = NetcodeConfig::default()
@@ -204,6 +238,7 @@ fn despawn_disconnected_players(
     players: Query<(Entity, &NetworkOwner)>,
     mut commands: Commands,
     mut client_map: ResMut<ClientPlayerMap>,
+    mut held_portals: ResMut<HeldPortalRegistry>,
 ) {
     let alive: HashSet<u64> = connections
         .iter()
@@ -223,6 +258,20 @@ fn despawn_disconnected_players(
                 "client_disconnected",
                 json!({"client_id": owner.0, "entity": format!("{:?}", entity)}),
             );
+        }
+    }
+    // Drop any held portals owned by clients that just left so they
+    // don't dangle. Iterate by collecting keys first because the loop
+    // borrows the map immutably while we want to remove from it.
+    let stale: Vec<_> = held_portals
+        .by_owner_slot
+        .keys()
+        .copied()
+        .filter(|(client_id, _)| !alive.contains(client_id))
+        .collect();
+    for key in stale {
+        if let Some(entity) = held_portals.by_owner_slot.remove(&key) {
+            commands.entity(entity).despawn();
         }
     }
 }
@@ -283,6 +332,8 @@ fn sync_networked_players(
                 // server reads Hurtbox for the damage path.
                 Hurtbox::new(PLAYER_MAX_HP, Team::Players),
                 NetworkedHealth { hp: PLAYER_MAX_HP, max_hp: PLAYER_MAX_HP },
+                EquippedWeapons::starter(),
+                ActiveWeaponSlot::default(),
             ),
             // Server-authoritative dynamic body (Stage Q option b).
             // Same params as the client-side rig in `src/player/mod.rs`
@@ -532,6 +583,7 @@ fn spawn_arena(mut commands: Commands, mut id_alloc: ResMut<NetworkedIdAlloc>) {
         let (collider, name) = match shape {
             PropShape::Cube { size } => (Collider::cuboid(size, size, size), "Prop-Cube"),
             PropShape::Sphere { radius } => (Collider::sphere(radius), "Prop-Sphere"),
+            PropShape::Cuboid { x, y, z } => (Collider::cuboid(x, y, z), "Prop-Cuboid"),
         };
         let net_id = id_alloc.next();
         trace::event(
@@ -540,7 +592,7 @@ fn spawn_arena(mut commands: Commands, mut id_alloc: ResMut<NetworkedIdAlloc>) {
         );
         commands.spawn((
             Name::new(name),
-            NetworkedProp { shape, tint_seed: seed, mass },
+            NetworkedProp { shape, tint_seed: seed, mass, tint: [0.0, 0.0, 0.0] },
             NetworkedId(net_id),
             NetworkedPosition::from_vec3(pos),
             Transform::from_translation(pos),
@@ -630,8 +682,12 @@ fn handle_throw_lantern(
                     Collider::sphere(LANTERN_RADIUS),
                     Mass(0.4),
                     Friction::new(1.0),
-                    LinearDamping(0.4),
-                    AngularDamping(0.5),
+                    // Float: ignore gravity (lantern hangs where it
+                    // was thrown), heavy linear damping so any push
+                    // bleeds off quickly instead of drifting forever.
+                    GravityScale(0.0),
+                    LinearDamping(2.5),
+                    AngularDamping(1.5),
                     Restitution::new(0.3),
                 ),
                 // Lanterns pass through player capsules so they don't get
@@ -700,14 +756,15 @@ fn apply_beam_impulses(
     spatial: SpatialQuery,
     mut receivers: Query<(&RemoteId, &mut MessageReceiver<BeamImpulseMessage>), With<ClientOf>>,
     props: Query<Entity, With<NetworkedProp>>,
-    players: Query<Entity, With<NetworkedPlayer>>,
     lanterns: Query<Entity, With<NetworkedLantern>>,
     mut forces: Query<Forces>,
     time: Res<Time>,
     mut beam_owners: Query<(&NetworkOwner, &mut BeamCastTimer), With<NetworkedPlayer>>,
     mut broadcast_senders: Query<&mut MessageSender<BeamCastBroadcast>, With<ClientOf>>,
+    client_map: Res<ClientPlayerMap>,
+    mut hurtboxes: Query<(&mut Hurtbox, Option<&mut NetworkedHealth>)>,
+    mut deaths: ResMut<Messages<DeathEvent>>,
 ) {
-    let excluded: Vec<Entity> = players.iter().chain(lanterns.iter()).collect();
     let now = time.elapsed_secs();
     for (RemoteId(peer_id), mut receiver) in &mut receivers {
         let client_id = match peer_id {
@@ -716,6 +773,16 @@ fn apply_beam_impulses(
             }
             _ => continue,
         };
+        // Resolve the shooter's player entity so we can (a) exclude
+        // them from the raycast (no self-hit) and (b) attribute kill
+        // credit when the beam takes someone down. Prior to this the
+        // exclude list dropped *every* player, which silently
+        // prevented lens-family beams from ever hitting another peer.
+        let shooter = client_map.0.get(&client_id).copied();
+        let mut excluded: Vec<Entity> = lanterns.iter().collect();
+        if let Some(s) = shooter {
+            excluded.push(s);
+        }
         for msg in receiver.receive() {
             let origin = Vec3::new(msg.origin[0], msg.origin[1], msg.origin[2]);
             let dir_vec = Vec3::new(msg.direction[0], msg.direction[1], msg.direction[2]);
@@ -747,19 +814,38 @@ fn apply_beam_impulses(
                 let _ = sender.send::<crate::net::protocol::PlayerInputChannel>(broadcast);
             }
             if let Some(hit) = hit {
-                if !props.contains(hit.entity) {
-                    continue;
+                // Impulse: only NetworkedProps are dynamic, so push
+                // them only. (Players are kinematic on the server-
+                // authoritative path and shouldn't be punted around
+                // by impulse anyway.)
+                if props.contains(hit.entity) {
+                    if let Ok(mut f) = forces.get_mut(hit.entity) {
+                        f.apply_linear_impulse(*dir * msg.magnitude);
+                        trace::event(
+                            "impulse_applied",
+                            json!({
+                                "target": format!("{:?}", hit.entity),
+                                "magnitude": msg.magnitude,
+                                "dir": [dir.x, dir.y, dir.z],
+                            }),
+                        );
+                    }
                 }
-                if let Ok(mut f) = forces.get_mut(hit.entity) {
-                    f.apply_linear_impulse(*dir * msg.magnitude);
-                    trace::event(
-                        "impulse_applied",
-                        json!({
-                            "target": format!("{:?}", hit.entity),
-                            "magnitude": msg.magnitude,
-                            "dir": [dir.x, dir.y, dir.z],
-                        }),
-                    );
+                // Damage: anything with a Hurtbox takes a hit. Iris
+                // sends a one-shot burst, convex_lens sends per-frame
+                // ticks — both populate `msg.damage` so this branch is
+                // generic.
+                if msg.damage > 0.0 {
+                    if let Ok((mut hurtbox, net_hp)) = hurtboxes.get_mut(hit.entity) {
+                        apply_damage_to_hurtbox(
+                            hit.entity,
+                            &mut hurtbox,
+                            net_hp,
+                            msg.damage,
+                            shooter,
+                            &mut deaths,
+                        );
+                    }
                 }
             }
         }
@@ -845,10 +931,173 @@ fn handle_place_portal(
                 NetworkedId(net_id),
                 NetworkedPosition::from_vec3(pos),
                 Transform::from_translation(pos).with_rotation(rotation),
+                ServerPrevPortalPose {
+                    translation: pos,
+                    rotation,
+                },
                 Replicate::manual(current_senders.clone()),
             ));
         }
     }
+}
+
+/// Server-authoritative per-tick state for the `handheld_portal` spell.
+/// First `active: true` message in a `(client_id, slot)` spawns a
+/// `HandheldPortal`-tagged `NetworkedPortal` (despawning any existing
+/// portal in that slot — handheld portals replace placed ones for
+/// their slot, matching the existing portal placement semantics).
+/// Subsequent messages update the existing portal's pose in place so
+/// every observer sees a continuous slide rather than spawn/despawn
+/// churn. `active: false` despawns.
+///
+/// Pose handling: `Transform.translation/rotation` AND `Position`
+/// (avian canonical) AND `NetworkedPosition.{x,y,z,yaw,pitch}` are all
+/// written each tick. Translation flows to clients via the existing
+/// portal `sync_networked_positions` system; rotation flows via
+/// `yaw`/`pitch` on `NetworkedPosition` (client-side
+/// `sync_handheld_portal_rotation` in `spells::handheld_portal`
+/// re-derives `Transform.rotation` from them — `NetworkedPortal.normal`
+/// updates are unreliable per CLAUDE.md, so we route via the reliable
+/// per-tick channel instead).
+fn handle_hold_portal(
+    mut receivers: Query<
+        (&RemoteId, &mut MessageReceiver<HoldPortalMessage>),
+        With<ClientOf>,
+    >,
+    senders: Query<Entity, (With<ClientOf>, With<Connected>)>,
+    existing: Query<(Entity, &NetworkedPortal), Without<HandheldPortal>>,
+    // Portals are Transform-only (no RigidBody / avian Position), same
+    // as `handle_place_portal`'s spawn — querying for `&mut Position`
+    // here would silently miss every update.
+    mut held: Query<
+        (&mut Transform, &mut NetworkedPosition, &mut NetworkedPortal),
+        With<HandheldPortal>,
+    >,
+    mut registry: ResMut<HeldPortalRegistry>,
+    mut commands: Commands,
+    mut id_alloc: ResMut<NetworkedIdAlloc>,
+) {
+    let current_senders: Vec<Entity> = senders.iter().collect();
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let client_id = match peer_id {
+            PeerId::Netcode(id)
+            | PeerId::Steam(id)
+            | PeerId::Local(id)
+            | PeerId::Entity(id) => *id,
+            _ => continue,
+        };
+        for msg in receiver.receive() {
+            let pos = Vec3::new(msg.position[0], msg.position[1], msg.position[2]);
+            if !pos.is_finite() || !msg.yaw.is_finite() || !msg.pitch.is_finite() {
+                continue;
+            }
+            let key = (client_id, msg.slot);
+            if !msg.active {
+                if let Some(entity) = registry.by_owner_slot.remove(&key) {
+                    commands.entity(entity).despawn();
+                }
+                continue;
+            }
+
+            let forward = forward_from_yaw_pitch(msg.yaw, msg.pitch);
+            let normal = -forward;
+            let rotation = disc_rotation(normal);
+            let normal_arr = [normal.x, normal.y, normal.z];
+
+            if let Some(&entity) = registry.by_owner_slot.get(&key) {
+                if let Ok((mut tf, mut netpos, mut np)) = held.get_mut(entity) {
+                    tf.translation = pos;
+                    tf.rotation = rotation;
+                    netpos.x = pos.x;
+                    netpos.y = pos.y;
+                    netpos.z = pos.z;
+                    netpos.yaw = msg.yaw;
+                    netpos.pitch = msg.pitch;
+                    np.normal = normal_arr;
+                }
+                // If `get_mut` failed here, the most common cause is
+                // that we spawned the entity earlier in *this same
+                // system call* via `commands.spawn(...)` and Commands
+                // haven't flushed yet — the entity is real but not
+                // visible to the query. Skipping is safe: the next
+                // message (next frame) finds it. Falling through to
+                // respawn would leak the just-spawned entity (it
+                // carries `HandheldPortal`, so the
+                // `Without<HandheldPortal>` conflict scan below
+                // wouldn't despawn it).
+                continue;
+            }
+
+            // Despawn any conflicting portal in this slot — handheld
+            // portals replace placed ones. Placed portals match via the
+            // `Without<HandheldPortal>` query above; conflicting handheld
+            // portals from other carriers are dropped from the registry
+            // and despawned.
+            for (e, np) in &existing {
+                if np.slot == msg.slot {
+                    commands.entity(e).despawn();
+                }
+            }
+            let other_holds: Vec<_> = registry
+                .by_owner_slot
+                .iter()
+                .filter(|((_, slot), _)| *slot == msg.slot)
+                .map(|(k, _)| *k)
+                .collect();
+            for k in other_holds {
+                if let Some(e) = registry.by_owner_slot.remove(&k) {
+                    commands.entity(e).despawn();
+                }
+            }
+
+            let net_id = id_alloc.next();
+            let mut netpos = NetworkedPosition::from_vec3(pos);
+            netpos.yaw = msg.yaw;
+            netpos.pitch = msg.pitch;
+            trace::event(
+                "handheld_portal_spawned",
+                json!({
+                    "client_id": client_id,
+                    "slot": format!("{:?}", msg.slot),
+                    "net_id": net_id,
+                    "pos": [pos.x, pos.y, pos.z],
+                }),
+            );
+            let entity = commands
+                .spawn((
+                    Name::new(format!(
+                        "HandheldPortal({client_id},{:?})",
+                        msg.slot
+                    )),
+                    NetworkedPortal {
+                        slot: msg.slot,
+                        normal: normal_arr,
+                    },
+                    HandheldPortal,
+                    NetworkOwner(client_id),
+                    NetworkedId(net_id),
+                    netpos,
+                    Transform::from_translation(pos).with_rotation(rotation),
+                    ServerPrevPortalPose {
+                        translation: pos,
+                        rotation,
+                    },
+                    Replicate::manual(current_senders.clone()),
+                ))
+                .id();
+            registry.by_owner_slot.insert(key, entity);
+        }
+    }
+}
+
+/// Camera forward direction (world -Z, then pitch around X, then yaw
+/// around Y) for the carrier of a handheld portal. Mirrors the
+/// client's `apply_rotation` + camera-child pitch chain so the server
+/// derives the same forward vector the client sees.
+fn forward_from_yaw_pitch(yaw: f32, pitch: f32) -> Vec3 {
+    let yaw_q = Quat::from_axis_angle(Vec3::Y, yaw);
+    let pitch_q = Quat::from_axis_angle(Vec3::X, pitch);
+    (yaw_q * pitch_q) * Vec3::NEG_Z
 }
 
 /// Generic server-spawn for `DeliveryDef::SpawnBody` / `Place`. Every
@@ -868,6 +1117,7 @@ fn handle_spawn_body(
     >,
     senders: Query<Entity, (With<ClientOf>, With<Connected>)>,
     catalog: Option<Res<crate::spells::catalog::SpellCatalog>>,
+    body_catalog: Option<Res<crate::spells::catalog::BodyCatalog>>,
     client_map: Res<ClientPlayerMap>,
     mut commands: Commands,
     mut id_alloc: ResMut<NetworkedIdAlloc>,
@@ -892,6 +1142,7 @@ fn handle_spawn_body(
             let collider = match msg.shape {
                 PropShape::Cube { size } => Collider::cuboid(size, size, size),
                 PropShape::Sphere { radius } => Collider::sphere(radius),
+                PropShape::Cuboid { x, y, z } => Collider::cuboid(x, y, z),
             };
             let net_id = id_alloc.next();
             trace::event(
@@ -930,6 +1181,7 @@ fn handle_spawn_body(
                         cast_id: crate::spells::data::CastId(p.cast_id.clone()),
                     }),
                     fired: false,
+                    elapsed: 0.0,
                 })
             });
             let mut entity = commands.spawn((
@@ -938,6 +1190,7 @@ fn handle_spawn_body(
                     shape: msg.shape,
                     tint_seed: msg.tint_seed,
                     mass: msg.mass,
+                    tint: msg.tint,
                 },
                 NetworkedId(net_id),
                 NetworkedPosition::from_vec3(origin),
@@ -961,6 +1214,59 @@ fn handle_spawn_body(
             if let Some(triggers) = triggers {
                 entity.insert(triggers);
             }
+
+            // Attach server-side body markers (e.g. `RollingGlacier`,
+            // `FrostSpike`) so the bespoke ice / projectile systems can
+            // find what they need to drive. Resolved from the parent
+            // cast's `SpawnBody.template` via the body catalog so the
+            // wire format doesn't need to learn about marker variants.
+            let markers: Option<Vec<crate::spells::data::MarkerKind>> = msg
+                .parent_cast
+                .as_ref()
+                .and_then(|p| {
+                    let cat = catalog.as_ref()?;
+                    let spell =
+                        cat.get(&crate::spells::SpellId(p.spell_id.clone()))?;
+                    let cast = spell.casts.iter().find(|c| c.id.0 == p.cast_id)?;
+                    let crate::spells::data::PayloadDef::SpawnBody { template, .. } =
+                        &cast.payload
+                    else {
+                        return None;
+                    };
+                    let body_cat = body_catalog.as_ref()?;
+                    let body = body_cat.get(template)?;
+                    Some(body.markers.clone())
+                });
+            if let Some(markers) = markers {
+                for marker in markers {
+                    match marker {
+                        crate::spells::data::MarkerKind::Lantern => {}
+                        crate::spells::data::MarkerKind::PortalTraveler => {
+                            // Already in the portal-traveler set via the
+                            // `Or<(NetworkedProp, NetworkedLantern, …)>`
+                            // filter in `server_portal_teleport`; no
+                            // explicit marker required.
+                        }
+                        crate::spells::data::MarkerKind::RollingGlacier => {
+                            entity.insert(crate::spells::markers::RollingGlacier {
+                                caster: original_caster,
+                                ..Default::default()
+                            });
+                        }
+                        crate::spells::data::MarkerKind::FrostSpike => {
+                            // See `spells::bodies::spawn_body` — this path
+                            // is dead today; `frost_spire` spawns its
+                            // own spike directly. Placeholder zeros.
+                            entity.insert(crate::spells::markers::FrostSpike {
+                                lifetime: 180.0,
+                                rise_remaining: 0.0,
+                                damage: 0.0,
+                                caster: original_caster,
+                            });
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -972,7 +1278,7 @@ fn handle_spawn_body(
 /// this, server physics pushes a prop straight through the portal plane
 /// and every observer sees it emerge on the wrong side.
 fn server_portal_teleport(
-    portals: Query<(Entity, &NetworkedPortal, &Transform)>,
+    portals: Query<(Entity, &NetworkedPortal, &Transform, &ServerPrevPortalPose)>,
     mut travelers: Query<
         (
             Entity,
@@ -996,21 +1302,43 @@ fn server_portal_teleport(
             )>,
         ),
     >,
+    // Player-specific writeback: server-side rotation gets clobbered by
+    // `apply_player_rotation` each FixedUpdate (it sets Rotation from
+    // PlayerInputState.yaw), so the teleport rotation needs to flow
+    // through input.yaw too. And the client's local `Facing.yaw`
+    // (camera direction + next input) needs a snap message to match.
+    mut player_inputs: Query<(&NetworkOwner, &mut PlayerInputState), With<NetworkedPlayer>>,
+    mut snap_senders: Query<&mut MessageSender<TeleportSnap>, With<ClientOf>>,
 ) {
     const LOCKOUT_RADIUS: f32 = PORTAL_RADIUS * 1.5;
 
-    let mut primary: Option<(Entity, Transform)> = None;
-    let mut secondary: Option<(Entity, Transform)> = None;
-    for (e, np, tf) in &portals {
+    // Each portal contributes (entity, current_tf, prev_tf). Prev pose
+    // is used for the prev_along crossing math so a moving portal
+    // (handheld) sweeping past a stationary traveler still registers as
+    // a crossing — without prev_tf, both sides of the comparison use
+    // the same current portal pose and the delta is just the traveler's
+    // motion.
+    let mut primary: Option<(Entity, Transform, Transform)> = None;
+    let mut secondary: Option<(Entity, Transform, Transform)> = None;
+    for (e, np, tf, prev_pose) in &portals {
         let mut tf = *tf;
         // `handle_place_portal` already sets rotation, but defend against
         // entities older than that change.
         if tf.rotation == Quat::IDENTITY {
             tf.rotation = disc_rotation(Vec3::from(np.normal));
         }
+        let prev_tf = Transform {
+            translation: prev_pose.translation,
+            rotation: prev_pose.rotation,
+            scale: Vec3::ONE,
+        };
         match np.slot {
-            crate::spells::portal::PortalSlot::Primary => primary = Some((e, tf)),
-            crate::spells::portal::PortalSlot::Secondary => secondary = Some((e, tf)),
+            crate::spells::portal::PortalSlot::Primary => {
+                primary = Some((e, tf, prev_tf))
+            }
+            crate::spells::portal::PortalSlot::Secondary => {
+                secondary = Some((e, tf, prev_tf))
+            }
         }
     }
 
@@ -1019,7 +1347,7 @@ fn server_portal_teleport(
         _ => None,
     };
 
-    for (_entity, mut tf, mut avian_pos, mut velocity, mut prev, mut lockout) in
+    for (entity, mut tf, mut avian_pos, mut velocity, mut prev, mut lockout) in
         &mut travelers
     {
         let pos = tf.translation;
@@ -1027,30 +1355,51 @@ fn server_portal_teleport(
         // Clear lockouts for portals this traveler has moved away from
         // (or that no longer exist).
         lockout.0.retain(|portal_e| match portals.get(*portal_e) {
-            Ok((_, _, ptf)) => (pos - ptf.translation).length() <= LOCKOUT_RADIUS,
+            Ok((_, _, ptf, _)) => (pos - ptf.translation).length() <= LOCKOUT_RADIUS,
             Err(_) => false,
         });
 
-        let Some(((primary_e, primary_tf), (secondary_e, secondary_tf))) = pair else {
+        let Some((
+            (primary_e, primary_tf, primary_prev),
+            (secondary_e, secondary_tf, secondary_prev),
+        )) = pair
+        else {
             prev.0 = Some(pos);
             continue;
         };
 
         let pairs = [
-            (primary_e, secondary_e, primary_tf, secondary_tf),
-            (secondary_e, primary_e, secondary_tf, primary_tf),
+            (
+                primary_e,
+                secondary_e,
+                primary_tf,
+                secondary_tf,
+                primary_prev,
+            ),
+            (
+                secondary_e,
+                primary_e,
+                secondary_tf,
+                primary_tf,
+                secondary_prev,
+            ),
         ];
 
         let prev_pos = prev.0.unwrap_or(pos);
         let mut teleported_to: Option<Vec3> = None;
 
-        for (entry_entity, exit_entity, entry, exit) in pairs {
+        for (entry_entity, exit_entity, entry, exit, prev_entry) in pairs {
             if lockout.0.contains(&entry_entity) {
                 continue;
             }
 
             let entry_normal = (entry.rotation * Vec3::Y).normalize();
-            let prev_along = (prev_pos - entry.translation).dot(entry_normal);
+            let prev_entry_normal = (prev_entry.rotation * Vec3::Y).normalize();
+            // prev_along uses the *previous* entry pose so portal motion
+            // is part of the relative delta; curr_along uses the current
+            // pose so we always teleport from the up-to-date disc.
+            let prev_along =
+                (prev_pos - prev_entry.translation).dot(prev_entry_normal);
             let curr_along = (pos - entry.translation).dot(entry_normal);
             let crossed = (prev_along > 0.0) != (curr_along > 0.0);
             if !crossed {
@@ -1063,20 +1412,103 @@ fn server_portal_teleport(
             } else {
                 0.0
             };
-            let cross_pos = prev_pos.lerp(pos, t);
-            let to_cross = cross_pos - entry.translation;
+            // Radial check in the *relative* (traveler − entry) frame so
+            // a portal sweeping over a stationary traveler still passes:
+            // both relative positions resolve to the traveler's offset
+            // from each disc, lerped at crossing time. Using absolute
+            // world positions would lerp a fixed point that the moving
+            // portal can sit far away from.
+            let prev_rel = prev_pos - prev_entry.translation;
+            let curr_rel = pos - entry.translation;
+            let cross_rel = prev_rel.lerp(curr_rel, t);
             let cross_radial =
-                (to_cross - entry_normal * to_cross.dot(entry_normal)).length();
+                (cross_rel - entry_normal * cross_rel.dot(entry_normal)).length();
             if cross_radial > PORTAL_RADIUS {
                 continue;
             }
 
-            let basis_pos = if prev_along > 0.0 { prev_pos } else { pos };
-            let to_basis = basis_pos - entry.translation;
-            let entry_inv = entry.rotation.inverse();
-            let q_pos = exit.rotation * entry_inv;
-            let vel_flip = Quat::from_rotation_x(core::f32::consts::PI);
-            let q_vel = exit.rotation * vel_flip * entry_inv;
+            // Pick the basis position AND the entry pose it was
+            // measured against together. With a moving (handheld)
+            // portal, the same world point can be on opposite sides of
+            // prev_entry and curr_entry — using basis_pos with the
+            // *current* entry pose would compute local_pos in a frame
+            // where the traveler is on the wrong side of the disc's
+            // normal, so the exit-side math places them below the
+            // exit disc and they immediately collide with whatever's
+            // behind it (the floor, for ground portals).
+            let (basis_pos, basis_entry) = if prev_along > 0.0 {
+                (prev_pos, prev_entry)
+            } else {
+                (pos, entry)
+            };
+            let basis_entry_inv = basis_entry.rotation.inverse();
+            // Anti-parallel portal pairs (opposite walls facing each
+            // other) get an X_local flip on position/rotation/velocity
+            // to cancel the natural world-X mirror that comes from
+            // entry vs exit walls having opposite X_local world
+            // directions. Parallel / perpendicular pairs (ground-to-
+            // ground, wall-to-floor, etc.) don't have that mirror in
+            // the first place, so applying the same flip would
+            // introduce one — which is what broke ground portals.
+            let needs_x_flip = {
+                let na = (basis_entry.rotation * Vec3::Y).normalize_or_zero();
+                let nb = (exit.rotation * Vec3::Y).normalize_or_zero();
+                na.dot(nb) < -0.5
+            };
+            let rot_flip = Quat::from_rotation_z(core::f32::consts::PI);
+            // For velocity: Z-rot π flips X_local + Y_local (anti-parallel
+            // cancel + "into → out of"). For non-anti-parallel pairs use
+            // X-rot π which only flips Y_local + Z_local so the world-X
+            // velocity component is preserved.
+            let vel_flip = if needs_x_flip {
+                rot_flip
+            } else {
+                Quat::from_rotation_x(core::f32::consts::PI)
+            };
+            let q_vel = exit.rotation * vel_flip * basis_entry_inv;
+
+            let is_player = player_inputs.contains(entity);
+            let (new_pos, new_rot) = if is_player {
+                let basis_tf = Transform {
+                    translation: basis_pos,
+                    rotation: tf.rotation,
+                    scale: Vec3::ONE,
+                };
+                let virtual_tf = crate::spells::portal::portal_virtual_transform(
+                    basis_tf,
+                    &basis_entry,
+                    &exit,
+                );
+                (virtual_tf.translation, virtual_tf.rotation)
+            } else {
+                let mut local_pos =
+                    basis_entry_inv * (basis_pos - basis_entry.translation);
+                if needs_x_flip {
+                    local_pos.x = -local_pos.x;
+                }
+                // One-sided ground exit: the -Y side of the disc is
+                // buried in the floor, so the only accessible side is
+                // +Y. Whichever side of the entry the body came from,
+                // emerge above the floor. Without this, walking into a
+                // floating portal from behind drops the body below the
+                // ground exit and it collides with the floor from the
+                // wrong side.
+                let exit_normal_world =
+                    (exit.rotation * Vec3::Y).normalize_or_zero();
+                if exit_normal_world.y
+                    >= crate::spells::portal::HORIZONTAL_NORMAL_DOT_Y
+                {
+                    local_pos.y = local_pos.y.abs();
+                }
+                let new_pos = exit.translation + exit.rotation * local_pos;
+                let q_rot = if needs_x_flip {
+                    exit.rotation * rot_flip * basis_entry_inv
+                } else {
+                    exit.rotation * basis_entry_inv
+                };
+                (new_pos, q_rot * tf.rotation)
+            };
+
             // Write avian's Position (canonical under
             // LightyearAvianPlugin's sync) AND Transform so any system
             // reading either within the same frame sees the post-teleport
@@ -1085,11 +1517,38 @@ fn server_portal_teleport(
             // which `sync_local_player_from_server` then snaps to the
             // local rig — so the teleport actually sticks on the local
             // client too.
-            let new_pos = exit.translation + q_pos * to_basis;
             tf.translation = new_pos;
-            tf.rotation = q_pos * tf.rotation;
+            tf.rotation = new_rot;
             avian_pos.0 = new_pos;
             velocity.0 = q_vel * velocity.0;
+
+            // Player teleport rotation handoff. Two consumers need to
+            // know the new yaw: (1) the server's own
+            // `apply_player_rotation` (FixedUpdate) — without an
+            // updated PlayerInputState.yaw, the rotation we just wrote
+            // gets clobbered next tick back to the pre-teleport
+            // direction; (2) the local client's `Facing.yaw` — drives
+            // the camera direction and what yaw the next input
+            // message carries. Both fed from the post-teleport
+            // forward vector via the same atan2 the retired
+            // local-only `process_teleports` used.
+            if let Ok((owner, mut input)) = player_inputs.get_mut(entity) {
+                let new_fwd = tf.rotation * Vec3::NEG_Z;
+                let horiz_len_sq = new_fwd.x * new_fwd.x + new_fwd.z * new_fwd.z;
+                if horiz_len_sq > 1e-6 {
+                    let inv = horiz_len_sq.sqrt().recip();
+                    let new_yaw = (-new_fwd.x * inv).atan2(-new_fwd.z * inv);
+                    input.yaw = new_yaw;
+                    let snap = TeleportSnap {
+                        client_id: owner.0,
+                        new_yaw,
+                    };
+                    for mut sender in &mut snap_senders {
+                        let _ =
+                            sender.send::<crate::net::protocol::PlayerInputChannel>(snap);
+                    }
+                }
+            }
 
             lockout.0.insert(entry_entity);
             lockout.0.insert(exit_entity);
@@ -1097,7 +1556,7 @@ fn server_portal_teleport(
             trace::event(
                 "prop_teleported",
                 json!({
-                    "entity": format!("{:?}", _entity),
+                    "entity": format!("{:?}", entity),
                     "from_portal": format!("{:?}", entry_entity),
                     "to_pos": [new_pos.x, new_pos.y, new_pos.z],
                 }),
@@ -1109,6 +1568,21 @@ fn server_portal_teleport(
     }
 }
 
+/// At the end of each Update, copy every portal's current Transform
+/// into its `ServerPrevPortalPose` so the next tick's
+/// `server_portal_teleport` sees the right "previous" pose. Scheduled
+/// `.after(server_portal_teleport)` to guarantee that the teleport
+/// pass reads the value from the prior frame, not the one we just
+/// wrote.
+fn update_prev_portal_pose(
+    mut q: Query<(&Transform, &mut ServerPrevPortalPose), With<NetworkedPortal>>,
+) {
+    for (tf, mut prev) in &mut q {
+        prev.translation = tf.translation;
+        prev.rotation = tf.rotation;
+    }
+}
+
 /// Spawns one `TestCube` at startup with replication enabled to all
 /// clients. Stage-N proof that the wire actually carries components.
 fn spawn_test_cube(mut commands: Commands) {
@@ -1117,4 +1591,267 @@ fn spawn_test_cube(mut commands: Commands) {
         Replicate::to_clients(NetworkTarget::All),
     ));
     info!("Spawned replicated TestCube.");
+}
+
+/// Drains `ChargeStateMessage` from each connected client and rebroadcasts
+/// it as `ChargeStateBroadcast` (stamped with the sender's `client_id`) to
+/// every other client so they can render the caster's third-person charge
+/// orb. Pure relay — the server doesn't run the cast engine, so this never
+/// reads or mutates server-side gameplay state.
+fn relay_charge_states(
+    mut receivers: Query<
+        (&RemoteId, &mut MessageReceiver<ChargeStateMessage>),
+        With<ClientOf>,
+    >,
+    mut broadcast_senders: Query<&mut MessageSender<ChargeStateBroadcast>, With<ClientOf>>,
+) {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let client_id = match peer_id {
+            PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => {
+                *id
+            }
+            _ => continue,
+        };
+        for msg in receiver.receive() {
+            let broadcast = ChargeStateBroadcast {
+                client_id,
+                active: msg.active,
+                ratio: msg.ratio,
+                tint: msg.tint,
+            };
+            for mut sender in &mut broadcast_senders {
+                let _ = sender.send::<crate::net::protocol::PlayerInputChannel>(broadcast);
+            }
+        }
+    }
+}
+
+/// Server-side mirror of `spells::portal::update_player_falling`: when a
+/// `NetworkedPlayer` is standing on top of a horizontal portal disc,
+/// drop the `Ground` layer from their collision filter so avian's
+/// gravity actually pulls them through. Without this the floor collider
+/// keeps the server's authoritative player above the disc and the
+/// teleport plane is never crossed — ground portals just look like
+/// painted spots on the floor.
+///
+/// Client-side `update_player_falling` runs in `PortalPlugin` which the
+/// server doesn't load (no `SpellsPlugin` on the server). And since
+/// Stage Q.5b the local client rig is kinematic, so flipping its
+/// collision layers wouldn't help — the position comes from the server
+/// via `NetworkedPosition` regardless.
+fn update_networked_player_falling(
+    mut commands: Commands,
+    portals: Query<(Entity, &NetworkedPortal, &Transform), Without<NetworkedPlayer>>,
+    mut players: Query<
+        (
+            Entity,
+            &Transform,
+            &CollisionLayers,
+            &ServerPortalLockout,
+        ),
+        With<NetworkedPlayer>,
+    >,
+) {
+    use crate::spells::portal::{
+        PortalSlot, HORIZONTAL_DISC_DEPTH, HORIZONTAL_NORMAL_DOT_Y, PORTAL_RADIUS,
+    };
+    // Only drop the Ground layer when *both* portal slots exist —
+    // otherwise the player falls through the floor with nowhere to
+    // emerge. With a single portal placed, leave the floor solid so
+    // the disc reads as a painted spot rather than a hole into the
+    // void.
+    let mut has_primary = false;
+    let mut has_secondary = false;
+    for (_, np, _) in &portals {
+        match np.slot {
+            PortalSlot::Primary => has_primary = true,
+            PortalSlot::Secondary => has_secondary = true,
+        }
+    }
+    let pair_exists = has_primary && has_secondary;
+
+    for (player_entity, player_tf, layers, lockout) in &mut players {
+        let mut in_threshold = false;
+        if pair_exists {
+            for (e, _, portal_tf) in &portals {
+                if lockout.0.contains(&e) {
+                    continue;
+                }
+                let normal = (portal_tf.rotation * Vec3::Y).normalize_or_zero();
+                if normal.y.abs() < HORIZONTAL_NORMAL_DOT_Y {
+                    continue;
+                }
+                let rel = player_tf.translation - portal_tf.translation;
+                let along = rel.dot(normal);
+                let radial = (rel - normal * along).length();
+                if radial < PORTAL_RADIUS && along.abs() < HORIZONTAL_DISC_DEPTH {
+                    in_threshold = true;
+                    break;
+                }
+            }
+        }
+
+        let target = if in_threshold {
+            CollisionLayers::new(GameLayer::Player, [GameLayer::Default, GameLayer::Player])
+        } else {
+            CollisionLayers::new(GameLayer::Player, LayerMask::ALL)
+        };
+
+        if *layers != target {
+            commands.entity(player_entity).insert(target);
+        }
+    }
+}
+
+/// Server-side mirror for replicated props + lanterns (the things that
+/// can roll/throw onto ground portals OR be hurled at surface portals).
+/// Same idea as `update_networked_player_falling`, but also has to
+/// handle the *surface* case: a fast prop (fireball, glacier) thrown
+/// at a wall-mounted portal would otherwise collide with the wall
+/// behind the portal (the portal sits at wall + `SURFACE_INSET` ≈ 2
+/// cm) one physics step *before* `server_portal_teleport` sees the
+/// sign-flip — and any `OnCollision`-triggered body explodes on the
+/// wrong wall before it ever crosses.
+///
+/// Per-portal threshold ⇒ which layer to drop:
+/// - horizontal (ground) portal, prop within `HORIZONTAL_DISC_DEPTH` ⇒
+///   drop `Ground` so gravity pulls it through the floor.
+/// - surface (wall) portal, prop within `SURFACE_DISC_DEPTH` along the
+///   wall normal ⇒ drop `Default` so the prop sails through the wall
+///   and reaches the portal plane intact.
+///
+/// Both can be true at once (a prop wedged where two portals overlap);
+/// the target filter ANDs both drops.
+fn update_networked_prop_falling(
+    mut commands: Commands,
+    portals: Query<
+        (Entity, &NetworkedPortal, &Transform),
+        (Without<NetworkedProp>, Without<NetworkedLantern>),
+    >,
+    mut props: Query<
+        (
+            Entity,
+            &Transform,
+            &CollisionLayers,
+            &ServerPortalLockout,
+        ),
+        (
+            Or<(With<NetworkedProp>, With<NetworkedLantern>)>,
+            Without<NetworkedPortal>,
+        ),
+    >,
+) {
+    use crate::spells::portal::{
+        PortalSlot, HORIZONTAL_DISC_DEPTH, HORIZONTAL_NORMAL_DOT_Y, PORTAL_RADIUS,
+        SURFACE_DISC_DEPTH,
+    };
+    // Same pair-gate as `update_networked_player_falling`: with only
+    // one slot placed, a prop near the disc has nowhere to emerge, so
+    // keep its collision filter intact and let it sit on top of the
+    // disc rather than fall through into the void.
+    let mut has_primary = false;
+    let mut has_secondary = false;
+    for (_, np, _) in &portals {
+        match np.slot {
+            PortalSlot::Primary => has_primary = true,
+            PortalSlot::Secondary => has_secondary = true,
+        }
+    }
+    let pair_exists = has_primary && has_secondary;
+
+    for (prop_entity, prop_tf, layers, lockout) in &mut props {
+        let mut near_horizontal = false;
+        let mut near_surface = false;
+        if pair_exists {
+            for (e, _, portal_tf) in &portals {
+                if lockout.0.contains(&e) {
+                    continue;
+                }
+                let normal = (portal_tf.rotation * Vec3::Y).normalize_or_zero();
+                let rel = prop_tf.translation - portal_tf.translation;
+                let along = rel.dot(normal);
+                let radial = (rel - normal * along).length();
+                if radial >= PORTAL_RADIUS {
+                    continue;
+                }
+                if normal.y.abs() >= HORIZONTAL_NORMAL_DOT_Y {
+                    if along.abs() < HORIZONTAL_DISC_DEPTH {
+                        near_horizontal = true;
+                    }
+                } else if along.abs() < SURFACE_DISC_DEPTH {
+                    near_surface = true;
+                }
+                if near_horizontal && near_surface {
+                    break;
+                }
+            }
+        }
+
+        let target = match (near_horizontal, near_surface) {
+            (false, false) => CollisionLayers::new(GameLayer::Default, LayerMask::ALL),
+            (true, false) => {
+                // Drop Ground so the prop falls through the floor.
+                CollisionLayers::new(GameLayer::Default, [GameLayer::Default, GameLayer::Player])
+            }
+            (false, true) => {
+                // Drop Default so the prop passes through the wall.
+                CollisionLayers::new(GameLayer::Default, [GameLayer::Ground, GameLayer::Player])
+            }
+            (true, true) => {
+                // Drop both — overlapping portals of different kinds.
+                CollisionLayers::new(GameLayer::Default, [GameLayer::Player])
+            }
+        };
+
+        if *layers != target {
+            commands.entity(prop_entity).insert(target);
+        }
+    }
+}
+
+/// Drain `EquipWeaponsMessage` from each connected client and stamp the
+/// loadout onto that client's `NetworkedPlayer.{EquippedWeapons,
+/// ActiveWeaponSlot}`. Replication then carries the change to every
+/// observer. No validation here — weapon ids are authored data, and a
+/// bad id just shows up as an empty slot in each observer's
+/// `WeaponCatalog` lookup.
+fn drain_equip_messages(
+    mut receivers: Query<
+        (&RemoteId, &mut MessageReceiver<EquipWeaponsMessage>),
+        With<ClientOf>,
+    >,
+    mut players: Query<
+        (&NetworkOwner, &mut EquippedWeapons, &mut ActiveWeaponSlot),
+        With<NetworkedPlayer>,
+    >,
+) {
+    for (RemoteId(peer_id), mut receiver) in &mut receivers {
+        let client_id = match peer_id {
+            PeerId::Netcode(id) | PeerId::Steam(id) | PeerId::Local(id) | PeerId::Entity(id) => {
+                *id
+            }
+            _ => continue,
+        };
+        let mut latest: Option<EquipWeaponsMessage> = None;
+        for msg in receiver.receive() {
+            latest = Some(msg);
+        }
+        let Some(msg) = latest else { continue };
+        for (owner, mut equipped, mut active) in &mut players {
+            if owner.0 != client_id {
+                continue;
+            }
+            let new_equipped = [
+                msg.slots[0].clone().map(WeaponId::new),
+                msg.slots[1].clone().map(WeaponId::new),
+            ];
+            if equipped.0 != new_equipped {
+                equipped.0 = new_equipped;
+            }
+            if active.0 != msg.active {
+                active.0 = msg.active;
+            }
+            break;
+        }
+    }
 }

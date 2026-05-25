@@ -51,6 +51,44 @@ pub fn apply_look(
 /// drift independently — locally you move, but every other peer sees
 /// you stuck near spawn, because the server's pose is the one that
 /// replicates and the local rig was a separate entity.
+/// Drain `TeleportSnap` messages from the server. When the server portal-
+/// teleports the local player, it broadcasts a snap with the post-rotation
+/// yaw; without applying it here, the client's `Facing.yaw` stays at the
+/// pre-teleport direction and the camera ends up looking the wrong way
+/// (and the next input message carries the old yaw, which the server then
+/// applies via `apply_player_rotation`, rotating the body back). Filters
+/// on `client_id == LocalId`; messages for other peers are ignored.
+pub fn apply_teleport_snaps(
+    local_ids: Query<
+        &lightyear::prelude::LocalId,
+        Without<lightyear::prelude::server::ClientOf>,
+    >,
+    mut receivers: Query<&mut lightyear::prelude::MessageReceiver<crate::net::protocol::TeleportSnap>>,
+    facing: Option<Single<&mut Facing, (With<Player>, With<LocalPlayer>)>>,
+) {
+    let Some(mut facing) = facing else {
+        return;
+    };
+    let my_id = local_ids.iter().next().and_then(|local_id| match local_id.0 {
+        lightyear::prelude::PeerId::Netcode(id)
+        | lightyear::prelude::PeerId::Steam(id)
+        | lightyear::prelude::PeerId::Local(id)
+        | lightyear::prelude::PeerId::Entity(id) => Some(id),
+        _ => None,
+    });
+    let Some(my_id) = my_id else {
+        return;
+    };
+    for mut receiver in &mut receivers {
+        for msg in receiver.receive() {
+            if msg.client_id != my_id {
+                continue;
+            }
+            facing.yaw = msg.new_yaw;
+        }
+    }
+}
+
 pub fn sync_local_player_from_server(
     local_ids: Query<
         &lightyear::prelude::LocalId,

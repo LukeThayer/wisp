@@ -23,6 +23,7 @@ use serde::Deserialize;
 
 pub mod bodies;
 pub mod catalog;
+pub mod charge_orb;
 pub mod convex_lens;
 pub mod damage;
 pub mod data;
@@ -31,7 +32,9 @@ pub mod effects;
 pub mod engine;
 pub mod handlers;
 pub mod hud;
+pub mod ice;
 pub mod iris;
+pub mod handheld_portal;
 pub mod lantern;
 pub mod markers;
 pub mod explosion;
@@ -51,6 +54,7 @@ impl Plugin for SpellsPlugin {
             .add_plugins(catalog::CatalogPlugin)
             .add_plugins(engine::CastEnginePlugin)
             .add_plugins(hud::CastHudPlugin)
+            .add_plugins(charge_orb::ChargeOrbPlugin)
             .add_systems(Update, apply_switch_spell)
             .add_systems(Update, engine::cancel_on_spell_change)
             .add_systems(Update, engine::add_action_snapshot_to_players);
@@ -68,7 +72,9 @@ impl Plugin for SpellsPlugin {
         convex_lens::register(app);
         iris::register(app);
         portal::register(app);
+        handheld_portal::register(app);
         lantern::register(app);
+        ice::register(app);
     }
 }
 
@@ -107,25 +113,6 @@ impl std::fmt::Display for SpellId {
 /// gates on this directly).
 #[derive(Component, Clone, Debug, PartialEq, Eq)]
 pub struct ActiveSpell(pub SpellId);
-
-/// The player's loadout: up to 8 radial slots, any of which may be empty.
-#[derive(Component, Clone, Debug)]
-pub struct EquippedSpells(pub [Option<SpellId>; 8]);
-
-impl Default for EquippedSpells {
-    fn default() -> Self {
-        Self([
-            Some(SpellId::new("convex_lens")),
-            Some(SpellId::new("iris")),
-            Some(SpellId::new("portal")),
-            Some(SpellId::new("lantern")),
-            Some(SpellId::new("stone_toss")),
-            Some(SpellId::new("slam_pulse")),
-            Some(SpellId::new("repulsor_field")),
-            Some(SpellId::new("fireball")),
-        ])
-    }
-}
 
 /// Buffered message emitted by the radial menu when the player picks a new
 /// spell. Handled centrally by [`apply_switch_spell`].

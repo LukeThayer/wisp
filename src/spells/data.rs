@@ -43,6 +43,10 @@ pub struct SpellDef {
     pub label: String,
     #[serde(default)]
     pub icon: Option<String>,
+    /// Element color for charge-time visuals (charge orb, future fx).
+    /// Optional — falls back to a warm default if omitted.
+    #[serde(default)]
+    pub tint: Option<crate::spells::bodies::ColorDef>,
     pub casts: Vec<CastDef>,
 }
 
@@ -356,6 +360,12 @@ fn default_falloff() -> crate::spells::damage::FalloffKind {
 pub enum MarkerKind {
     Lantern,
     PortalTraveler,
+    /// Server selects `src/spells/ice.rs` behaviour for the rolling ice
+    /// boulder: drops `FrozenGround` tiles, damages on momentum, fires
+    /// `rolling_glacier.expire` on timeout.
+    RollingGlacier,
+    /// Hitbox-only marker for the ice spike spawned by `frost_spire`.
+    FrostSpike,
 }
 
 #[cfg(test)]

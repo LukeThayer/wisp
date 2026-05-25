@@ -1,0 +1,52 @@
+// Rolling Glacier: a heavy blue ball lobbed forward that leaves a trail
+// of frozen ground behind it. The ball is server-spawned + replicated
+// (`NetworkedProp` with the `RollingGlacier` body marker). All bespoke
+// behaviour — trail drops, momentum-scaled hitbox damage, expiry AoE —
+// lives in `src/spells/ice.rs`.
+//
+// `on_event: OnTimeout` triggers the `rolling_glacier.expire` child
+// cast 8 seconds after spawn, which drops a wide frozen patch + a small
+// AoE burst at the ball's last location.
+SpellDef(
+    id: "rolling_glacier",
+    label: "Rolling Glacier",
+    tint: Some((r: 0.55, g: 0.85, b: 1.0)),
+    casts: [
+        (
+            id: "rolling_glacier.roll",
+            label: "Roll",
+            trigger: PressReleaseCharged(action: Fire),
+            charging: Charging(
+                // No min_release gating: any click rolls a glacier. Keeps
+                // the spell snappy for testing — charge still scales
+                // future damage when momentum-based hitboxes ship.
+                source: Time(duration: 0.4),
+                min_release: 0.0,
+                max_charge: 1.0,
+            ),
+            cooldown: 0.8,
+            payload: SpawnBody(
+                template: "glacier_ball",
+                launch: Throw(forward: 9.0, up: 0.0),
+                on_event: [
+                    OnTimeout(secs: 8.0, triggers: (
+                        spell_id: "rolling_glacier",
+                        cast_id: "rolling_glacier.expire",
+                    )),
+                ],
+            ),
+        ),
+        // Child cast — not user-triggered, fires via the `OnTimeout`
+        // body trigger above. `requires_active: false` so it dispatches
+        // even though the caster has long since swapped weapons.
+        (
+            id: "rolling_glacier.expire",
+            label: "Glacier expire",
+            requires_active: false,
+            trigger: Press(action: Fire),
+            target: Area(shape: Sphere(radius: 3.5)),
+            payload: Custom(handler: "rolling_glacier.expire"),
+            effect: AreaDamage(base_damage: 35.0, falloff: Linear),
+        ),
+    ],
+)

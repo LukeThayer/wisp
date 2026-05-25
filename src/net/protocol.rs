@@ -42,6 +42,18 @@ impl Plugin for ProtocolPlugin {
         // `CustomizeMessage` (client → server) then propagate back
         // through component replication.
         app.register_component::<PlayerCustomization>();
+        // Equipped weapons + active slot. Per-player, replicated so
+        // other clients can see who's holding what (loadout influences
+        // future weapon-mesh attachment, animations, etc.). Updates
+        // flow as `EquipWeaponsMessage` (client → server) then
+        // propagate back through component replication.
+        app.register_component::<crate::weapons::EquippedWeapons>();
+        app.register_component::<crate::weapons::ActiveWeaponSlot>();
+        // Ice magic: per-tile frozen ground patches, server-spawned and
+        // visualized on each client as a flat blue disc with a
+        // low-friction collider.
+        app.register_component::<NetworkedFrozenGround>();
+        app.register_component::<NetworkedFrostSpike>();
         // NetworkedPosition gets frame-level interpolation: lightyear
         // buffers each received tick into a `ConfirmedHistory` and lerps
         // toward the latest sample over the local frame, hiding the
@@ -53,6 +65,14 @@ impl Plugin for ProtocolPlugin {
         app.register_component::<NetworkedProp>();
         app.register_component::<NetworkedLantern>();
         app.register_component::<NetworkedPortal>();
+        // Marker on portals spawned by the `handheld_portal` spell. The
+        // client reads it to opt into per-tick `Transform.rotation`
+        // updates from `NetworkedPosition.yaw`/`.pitch` — placed
+        // portals don't rotate, so the rotation sync system filters on
+        // this marker. Initial value replication is sufficient (CLAUDE.md:
+        // initial component values are reliable; updates aren't), and
+        // the marker doesn't change for the portal's lifetime.
+        app.register_component::<HandheldPortal>();
         app.register_component::<NetworkedId>();
         // NetworkedHealth replicates current + max hp on any entity with
         // a Hurtbox. Server is authoritative — clients only read this
@@ -116,12 +136,26 @@ impl Plugin for ProtocolPlugin {
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<PlacePortalMessage>()
             .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<HoldPortalMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<SpawnBodyMessage>()
             .add_direction(NetworkDirection::ClientToServer);
         app.register_message::<BeamCastBroadcast>()
             .add_direction(NetworkDirection::ServerToClient);
         app.register_message::<CustomizeMessage>()
             .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<ChargeStateMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<ChargeStateBroadcast>()
+            .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<TeleportSnap>()
+            .add_direction(NetworkDirection::ServerToClient);
+        app.register_message::<EquipWeaponsMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<FrostSpireMessage>()
+            .add_direction(NetworkDirection::ClientToServer);
+        app.register_message::<GlacierScaleBroadcast>()
+            .add_direction(NetworkDirection::ServerToClient);
     }
 }
 
@@ -157,32 +191,48 @@ pub struct PlayerInputMessage {
 /// interaction with replicated props lands once client→server spell casts
 /// are wired.
 /// Client → server impulse application. The server raycasts from
-/// `(origin, direction)` up to `range`, finds the first `NetworkedProp`
-/// it hits, and applies a linear impulse of `direction * magnitude` to it.
-/// Used by lens-family spells to push replicated props authoritatively.
+/// `(origin, direction)` up to `range`, finds the first replicated entity
+/// it hits, and (a) applies a linear impulse of `direction * magnitude`
+/// to props and (b) applies `damage` to anything with a `Hurtbox`
+/// (other players, breakable props). Used by lens-family spells —
+/// `iris.burst` ships a one-shot scaled by captured charge, and
+/// `convex_lens.beam` ships a per-frame tick scaled by `power.scalar * dt`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct BeamImpulseMessage {
     pub origin: [f32; 3],
     pub direction: [f32; 3],
     pub range: f32,
     pub magnitude: f32,
+    pub damage: f32,
 }
 
 #[derive(Component, Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct NetworkedProp {
     pub shape: PropShape,
-    /// Tint seed — clients use it to pick a deterministic color. Match
-    /// what the previous single-player `spawn_arena` did.
+    /// Tint seed — clients use it to pick a deterministic color when
+    /// `tint` is `[0; 3]`. Match the previous single-player
+    /// `spawn_arena` look for arena props.
     pub tint_seed: f32,
     /// Mass for the locally-simulated dynamic body. Same value on every
     /// client so spell-impulse feel matches.
     pub mass: f32,
+    /// Linear-RGB base color for the rendered material. Filled by the
+    /// server from the body template's `material.base_color` so spell-
+    /// spawned bodies (fireball, glacier, spike) render in their
+    /// authored color. `[0, 0, 0]` falls back to the `tint_seed`
+    /// procedural palette so existing arena-spawn props look the same.
+    #[serde(default)]
+    pub tint: [f32; 3],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum PropShape {
     Cube { size: f32 },
     Sphere { radius: f32 },
+    /// Non-uniform box. Used for tall spikes + flat disc-style frozen
+    /// ground tiles. `x/y/z` are full extents (not half-widths) to
+    /// match `Cube { size }` semantics.
+    Cuboid { x: f32, y: f32, z: f32 },
 }
 
 impl Default for PropShape {
@@ -241,6 +291,11 @@ pub struct SpawnBodyMessage {
     pub angular_damping: f32,
     pub restitution: f32,
     pub tint_seed: f32,
+    /// Per-body color stamped from the body template's
+    /// `material.base_color`. Lets every peer render the prop in the
+    /// authored color instead of the generic `tint_seed` palette.
+    #[serde(default)]
+    pub tint: [f32; 3],
     pub parent_cast: Option<ParentCastInfo>,
 }
 
@@ -285,6 +340,32 @@ pub struct PlacePortalMessage {
     pub slot: PortalSlot,
     pub position: [f32; 3],
     pub normal: [f32; 3],
+}
+
+/// Marker for portals created by the `handheld_portal` spell. Replicated
+/// (initial-value only — never changes for the entity's lifetime) so the
+/// client can opt into rotation updates from `NetworkedPosition` for
+/// these portals; placed portals stay rotationally static.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HandheldPortal;
+
+/// Client → server: "I'm holding portal `slot`; here's my current camera
+/// pose this frame." Server keeps one `HandheldPortal`-tagged
+/// `NetworkedPortal` per `(client_id, slot)`. First `active: true`
+/// message in a slot spawns it (despawning any existing portal in that
+/// slot, handheld or placed); subsequent messages update Transform +
+/// `NetworkedPosition` (which carries yaw/pitch so clients can derive
+/// the rotation). `active: false` despawns. Sent every frame while the
+/// cast is in `Channeling`; one trailing release on transition.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HoldPortalMessage {
+    pub slot: PortalSlot,
+    pub active: bool,
+    pub position: [f32; 3],
+    /// Carrier camera yaw (world Y rotation) in radians.
+    pub yaw: f32,
+    /// Carrier camera pitch in radians (positive = looking up).
+    pub pitch: f32,
 }
 
 /// Stage-N smoke marker. Server spawns one of these with `Replicate`;
@@ -379,6 +460,119 @@ pub struct BeamCastBroadcast {
     pub origin: [f32; 3],
     pub direction: [f32; 3],
     pub length: f32,
+}
+
+/// Client → server: "my local charge state is now this." Sent every frame
+/// while the local player is in `CastPhase::Charging`, plus a single
+/// `active: false` on the trailing transition. Same per-tick-state +
+/// message-broadcast pattern as the beam path — the cast engine still runs
+/// purely client-side, so this carries the visual snapshot every other
+/// peer needs to render the third-person charge orb on the caster's hand.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChargeStateMessage {
+    pub active: bool,
+    /// Normalized charge progress in [0, 1] (clamped client-side; values
+    /// above 1.0 from `overcharge` are pre-clamped before send).
+    pub ratio: f32,
+    /// Linear-RGB element color, looked up from the active spell's `tint`.
+    /// On the wire so receivers don't need to know spell ids.
+    pub tint: [f32; 3],
+}
+
+/// Server → all-clients rebroadcast of [`ChargeStateMessage`] with the
+/// caster's `client_id` stamped in. Receivers filter their own loopback by
+/// `client_id == my LocalId` (the local player renders their own orb via
+/// the wand-tip `LensAnchor`, not via this third-person path).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ChargeStateBroadcast {
+    pub client_id: u64,
+    pub active: bool,
+    pub ratio: f32,
+    pub tint: [f32; 3],
+}
+
+/// Server-spawned tile of frozen ground laid down by the rolling glacier
+/// or its expiry burst. Sensor collider so things glide across without
+/// bouncing; the server uses contact events for the "ball rolls onto
+/// other ball's ice → grow" interaction. `radius` drives the disc size
+/// on the client.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkedFrozenGround {
+    pub radius: f32,
+}
+
+/// Replicated marker on server-spawned frost spikes. The full
+/// server-side `FrostSpike` carries gameplay state (lifetime,
+/// rise_remaining, damage, caster `Entity`) that wouldn't survive a
+/// trip across the wire — this is the slim client-visible version
+/// that powers (a) the targeting raycast in the frost-spire cast
+/// handler / HUD ("is this prop a spike?"), and (b) the per-frame
+/// rotation override in `smooth_networked_transforms` (the spike's
+/// orientation is *not* yaw-only, so the generic smoother's
+/// `Quat::from_axis_angle(Y, yaw)` would otherwise force every spike
+/// upright).
+///
+/// `normal` is the surface normal the spike emerged along — its
+/// local +Y axis in world space. Constant for the spike's lifetime.
+#[derive(Component, Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct NetworkedFrostSpike {
+    pub normal: [f32; 3],
+}
+
+/// Server → all-clients: "the glacier ball with this `net_id` is now
+/// `scale` times its original size — please scale its visual to match."
+/// Sent whenever a glacier grows from rolling over another glacier's
+/// frost. Receivers find the entity by `NetworkedId` and apply
+/// `Transform.scale = scale * Vec3::ONE`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct GlacierScaleBroadcast {
+    pub net_id: u64,
+    pub scale: f32,
+}
+
+/// Client → server: "fire a frost spire at this world position with
+/// this charge, emerging along this surface normal." The server
+/// validates the origin against a nearby ice source (frozen ground
+/// tile *or* existing spike), consumes the tile if applicable, and
+/// spawns the new spike pointing along `normal`. Routed as a one-shot
+/// message so the spike spawn stays bundled with the consume logic.
+///
+/// `normal` is the client raycast hit normal — typically `+Y` for
+/// floor-mounted frost ground, horizontal for spikes hit on their
+/// sides, etc. Server treats it as the spike's local up axis.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct FrostSpireMessage {
+    pub origin: [f32; 3],
+    pub normal: [f32; 3],
+    pub captured_charge: f32,
+}
+
+/// Client → server: "set my equipped weapons + active slot to these values."
+/// Slots are weapon ids as plain `String` for wire stability — the server
+/// stamps them onto the sender's `NetworkedPlayer.{EquippedWeapons,
+/// ActiveWeaponSlot}` and replication propagates to every observer. No
+/// validation on the server: weapon ids are authored data and bad ones
+/// just leave that slot blank when each client looks it up in its
+/// `WeaponCatalog`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct EquipWeaponsMessage {
+    pub slots: [Option<String>; 2],
+    pub active: u8,
+}
+
+/// Server → all-clients: "this player just teleported through a portal;
+/// snap their camera yaw to `new_yaw`." Without this, the server-side
+/// `server_portal_teleport` rotates the body Transform but the local
+/// client's `Facing.yaw` (which drives camera direction + the next input
+/// message) stays where it was — so the player crosses the portal but
+/// looks the wrong direction, and the server's `apply_player_rotation`
+/// snaps the body back to that direction on the next FixedUpdate.
+/// The local client only acts on messages tagged with its own
+/// `client_id`; the other peers receive these too but ignore them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct TeleportSnap {
+    pub client_id: u64,
+    pub new_yaw: f32,
 }
 
 /// Server-assigned stable id shared across every peer. Server increments a

@@ -7,6 +7,7 @@
 SpellDef(
     id: "repulsor_field",
     label: "Repulsor Field",
+    tint: Some((r: 0.4, g: 1.0, b: 0.55)),
     casts: [
         (
             id: "repulsor_field.push",

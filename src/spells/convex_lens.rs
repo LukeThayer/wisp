@@ -113,6 +113,12 @@ pub struct LensSource {
 const BEAM_MAX_RANGE: f32 = 30.0;
 /// Peak impulse magnitude (kg·m/s) per second of channel at point-blank.
 const BEAM_IMPULSE_RATE: f32 = 80.0;
+/// Damage applied per second of beam contact at full power
+/// (`power.scalar = 1`). Scaled per-frame by `power.scalar * dt` so the
+/// hit's lens-power gating modulates damage the same way it modulates
+/// impulse. 30/sec → ~3.3s sustained beam to drop a player at
+/// PLAYER_MAX_HP, leaving room for evasion / counter-fire.
+const BEAM_DAMAGE_RATE: f32 = 30.0;
 /// Distance from the lantern at which beam power decays to zero.
 const BEAM_POWER_FALLOFF: f32 = 14.0;
 /// Past this distance, the channel breaks.
@@ -451,6 +457,7 @@ pub fn cast_beam(
     }
 
     let impulse_magnitude = BEAM_IMPULSE_RATE * power.scalar * dt;
+    let damage = BEAM_DAMAGE_RATE * power.scalar * dt;
     if let Some((dir_at_hit, target)) = hit.impulse_info {
         // Local impulse — works on locally-simulated bodies (lanterns).
         // Replicated server-authoritative props (NetworkedProp) have
@@ -471,6 +478,7 @@ pub fn cast_beam(
             direction: [beam_dir.x, beam_dir.y, beam_dir.z],
             range: BEAM_MAX_RANGE,
             magnitude: impulse_magnitude,
+            damage,
         });
     }
 }
@@ -732,9 +740,11 @@ mod hud {
         mut roots: Query<(&mut Node, &Children), With<LumenText>>,
         mut texts: Query<(&mut Text, &mut TextColor)>,
     ) {
+        // Both lens-family channeled spells care about alignment: convex_lens
+        // for the channel itself, iris for charging the burst from LensPower.
         let show = player
             .as_ref()
-            .map(|p| p.1.0.is("convex_lens"))
+            .map(|p| p.1.0.is("convex_lens") || p.1.0.is("iris"))
             .unwrap_or(false);
         if !show {
             for (mut node, _) in &mut roots {
@@ -778,9 +788,11 @@ mod hud {
         mut indicator: Query<&mut Node, (With<AlignmentIndicator>, Without<AlignmentDot>)>,
         mut dots: Query<(&AlignmentDot, &mut Node, &mut BackgroundColor)>,
     ) {
+        // Both lens-family channeled spells care about alignment: convex_lens
+        // for the channel itself, iris for charging the burst from LensPower.
         let show = player
             .as_ref()
-            .map(|p| p.1.0.is("convex_lens"))
+            .map(|p| p.1.0.is("convex_lens") || p.1.0.is("iris"))
             .unwrap_or(false);
         if !show {
             for mut node in &mut indicator {

@@ -34,6 +34,8 @@ impl Plugin for ReplicationLocalPlugin {
         app.add_observer(on_networked_player_replicated);
         app.add_observer(on_networked_prop_replicated);
         app.add_observer(on_networked_lantern_replicated);
+        app.add_observer(crate::spells::ice::on_frozen_ground_replicated);
+        app.add_systems(Update, crate::spells::ice::apply_glacier_scale_broadcasts);
         app.add_systems(
             Update,
             (
@@ -118,9 +120,24 @@ fn capture_networked_position_samples(
             s.cur_time = now;
             s.initialized = true;
         } else {
-            s.prev_pos = s.cur_pos;
-            s.prev_yaw = s.cur_yaw;
-            s.prev_time = s.cur_time;
+            // Teleport detection: a `NetworkedPosition` jump > 3m in a
+            // single tick is well beyond any normal per-tick motion
+            // (fastest thrown body is ~0.3m / tick at 60 Hz). Snap
+            // both prev and cur to the new value so the lerp produces
+            // an instant pop — without this, portal teleports look
+            // like the body flies across the room over `span`
+            // seconds, which is what made glaciers "not appear" at
+            // the exit portal.
+            let teleport = pos.distance_squared(s.cur_pos) > 9.0;
+            if teleport {
+                s.prev_pos = pos;
+                s.prev_yaw = np.yaw;
+                s.prev_time = now;
+            } else {
+                s.prev_pos = s.cur_pos;
+                s.prev_yaw = s.cur_yaw;
+                s.prev_time = s.cur_time;
+            }
             s.cur_pos = pos;
             s.cur_yaw = np.yaw;
             s.cur_time = now;
@@ -151,13 +168,14 @@ fn smooth_networked_transforms(
             &mut Transform,
             Option<&mut avian3d::prelude::Position>,
             Option<&mut avian3d::prelude::Rotation>,
+            Option<&crate::net::protocol::NetworkedFrostSpike>,
         ),
         Without<NetworkedPortal>,
     >,
 ) {
     use core::f32::consts::PI;
     let now = time.elapsed_secs();
-    for (s, mut tf, pos_opt, rot_opt) in &mut q {
+    for (s, mut tf, pos_opt, rot_opt, spike_opt) in &mut q {
         if !s.initialized {
             continue;
         }
@@ -165,14 +183,28 @@ fn smooth_networked_transforms(
         let render_time = now - span;
         let t = ((render_time - s.prev_time) / span).clamp(0.0, 1.0);
         let pos = s.prev_pos.lerp(s.cur_pos, t);
-        let mut dyaw = s.cur_yaw - s.prev_yaw;
-        if dyaw > PI {
-            dyaw -= 2.0 * PI;
-        } else if dyaw < -PI {
-            dyaw += 2.0 * PI;
-        }
-        let yaw = s.prev_yaw + dyaw * t;
-        let rot = Quat::from_axis_angle(Vec3::Y, yaw);
+        // Spikes don't rotate around Y per-tick like players do —
+        // their orientation is locked to the surface normal they
+        // emerged from. Use the replicated normal to derive the same
+        // rotation the server set, so the local mesh + collider
+        // match the server's pose. Without this branch, the default
+        // yaw-based formula forces every spike upright (and the
+        // cuboid collider falls out of alignment with the visual).
+        let rot = if let Some(spike) = spike_opt {
+            let normal = Vec3::from(spike.normal)
+                .try_normalize()
+                .unwrap_or(Vec3::Y);
+            crate::spells::portal::disc_rotation(normal)
+        } else {
+            let mut dyaw = s.cur_yaw - s.prev_yaw;
+            if dyaw > PI {
+                dyaw -= 2.0 * PI;
+            } else if dyaw < -PI {
+                dyaw += 2.0 * PI;
+            }
+            let yaw = s.prev_yaw + dyaw * t;
+            Quat::from_axis_angle(Vec3::Y, yaw)
+        };
         tf.translation = pos;
         tf.rotation = rot;
         if let Some(mut p) = pos_opt {
@@ -665,6 +697,9 @@ fn resolve_pending_arrivals(
             payload["shape"] = match p.shape {
                 PropShape::Cube { size } => json!({"kind": "cube", "size": size}),
                 PropShape::Sphere { radius } => json!({"kind": "sphere", "radius": radius}),
+                PropShape::Cuboid { x, y, z } => {
+                    json!({"kind": "cuboid", "x": x, "y": y, "z": z})
+                }
             };
         }
         if let Some(p) = portal {
@@ -808,13 +843,30 @@ fn on_networked_prop_replicated(
     let Ok(prop) = replicated.get(trigger.entity) else {
         return;
     };
+    // Prefer the explicit per-body tint stamped by the spawn handler
+    // (so spell-thrown bodies render in their authored color). Falls
+    // back to the procedural `tint_seed` palette when tint is empty,
+    // matching the original arena-prop look.
     let seed = prop.tint_seed;
-    let material = materials.add(StandardMaterial {
-        base_color: Color::srgb(
+    let explicit_tint = prop.tint[0] > 0.0 || prop.tint[1] > 0.0 || prop.tint[2] > 0.0;
+    let base = if explicit_tint {
+        Color::srgb(prop.tint[0], prop.tint[1], prop.tint[2])
+    } else {
+        Color::srgb(
             0.4 + 0.5 * (seed * 1.3).fract(),
             0.4 + 0.5 * (seed * 2.7).fract(),
             0.4 + 0.5 * (seed * 5.1).fract(),
-        ),
+        )
+    };
+    let material = materials.add(StandardMaterial {
+        base_color: base,
+        // Mild emissive lift on tinted spell bodies so projectiles
+        // read clearly against ground / sky regardless of lighting.
+        emissive: if explicit_tint {
+            LinearRgba::new(prop.tint[0] * 0.6, prop.tint[1] * 0.6, prop.tint[2] * 0.9, 1.0)
+        } else {
+            LinearRgba::BLACK
+        },
         perceptual_roughness: 0.6,
         ..default()
     });
@@ -826,6 +878,10 @@ fn on_networked_prop_replicated(
         PropShape::Sphere { radius } => {
             (meshes.add(Sphere::new(radius)), Collider::sphere(radius))
         }
+        PropShape::Cuboid { x, y, z } => (
+            meshes.add(Cuboid::new(x, y, z)),
+            Collider::cuboid(x, y, z),
+        ),
     };
     let _ = prop.mass; // unused; server is the physics authority now.
     commands.entity(trigger.entity).insert((

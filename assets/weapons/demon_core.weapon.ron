@@ -1,0 +1,10 @@
+// Demon core: contained infernal mass — fuels fire-aligned spells.
+// (`explosion_small` is a child cast triggered by fireball; not directly
+// equippable.)
+WeaponDef(
+    id: "demon_core",
+    label: "Demon Core",
+    spells: [
+        "fireball",
+    ],
+)

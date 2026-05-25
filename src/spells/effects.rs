@@ -80,6 +80,10 @@ pub fn despawn_nearby_matching(
                 }
             }
         }
+        // Ice-magic markers — no DespawnNearbyMatching spell targets
+        // these today. Variants exist so other systems (server bodies +
+        // ice tick) can identify them.
+        MarkerKind::RollingGlacier | MarkerKind::FrostSpike => {}
     }
     for e in to_despawn {
         if let Ok(em) = world.get_entity_mut(e) {

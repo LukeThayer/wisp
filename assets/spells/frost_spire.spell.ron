@@ -1,0 +1,25 @@
+// Frost Spire: hold to channel a growing ice spike, release to summon
+// it at the caster's feet. Damage + reach scale by captured_charge.
+// Server-side handler (`frost_spire.cast`) consumes the frozen ground
+// tile beneath the caster — the spike's "fuel" — and spawns a tall
+// pillar `NetworkedProp` with a `Hitbox` so anything caught in its
+// upward sweep takes damage.
+SpellDef(
+    id: "frost_spire",
+    label: "Frost Spire",
+    tint: Some((r: 0.55, g: 0.85, b: 1.0)),
+    casts: [
+        (
+            id: "frost_spire.cast",
+            label: "Spire",
+            trigger: PressReleaseCharged(action: Fire),
+            charging: Charging(
+                source: Time(duration: 0.9),
+                min_release: 0.2,
+                max_charge: 1.0,
+            ),
+            cooldown: 0.9,
+            payload: Custom(handler: "frost_spire.cast"),
+        ),
+    ],
+)

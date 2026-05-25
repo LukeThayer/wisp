@@ -1,0 +1,27 @@
+// Ice spike: tall thin pillar of ice spawned by `frost_spire`. Mostly
+// a hitbox carrier — the spike is static (anchored to the ground) and
+// damages on contact via the bespoke handler in `src/spells/ice.rs`.
+BodyDef(
+    id: "ice_spike",
+    mesh: Cuboid(x: 0.45, y: 2.6, z: 0.45),
+    material: (
+        base_color: (r: 0.65, g: 0.9,  b: 1.0),
+        emissive:   (r: 0.4,  g: 0.85, b: 1.4),
+        roughness: 0.1,
+    ),
+    physics: (
+        body: Static,
+        collider: Cuboid(x: 0.45, y: 2.6, z: 0.45),
+        mass: 1.0,
+        friction: 0.6,
+        linear_damping: 0.0,
+        angular_damping: 0.0,
+        restitution: 0.0,
+    ),
+    light: Some((
+        color: (r: 0.55, g: 0.85, b: 1.0),
+        intensity: 18000.0,
+        range: 6.0,
+    )),
+    markers: [FrostSpike],
+)

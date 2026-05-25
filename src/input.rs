@@ -35,6 +35,19 @@ pub struct Jump;
 #[action_output(bool)]
 pub struct OpenRadial;
 
+/// Tap to cycle between equipped weapon slots (slot 0 ↔ slot 1).
+/// Repopulates the radial wheel + snaps `ActiveSpell` to the new
+/// weapon's first spell.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct SwapWeapon;
+
+/// Tap to open / close the inventory modal where the player swaps
+/// weapons into slots.
+#[derive(InputAction)]
+#[action_output(bool)]
+pub struct OpenInventory;
+
 #[derive(InputAction)]
 #[action_output(bool)]
 pub struct Fire;
@@ -67,6 +80,9 @@ pub enum InputMode {
     /// player input context is inactive so mouse-look + WASD are
     /// silently consumed by the UI.
     Customizing,
+    /// Inventory modal open: cursor is free for clicking weapon /
+    /// slot buttons, player input is silenced.
+    Inventory,
 }
 
 /// `require_reset: true` keeps a held button from re-firing when the context
@@ -125,6 +141,14 @@ pub fn player_actions() -> impl Bundle {
             action::<CycleCharacter>(),
             bindings![KeyCode::KeyC],
         ),
+        (
+            action::<SwapWeapon>(),
+            bindings![KeyCode::Tab],
+        ),
+        (
+            action::<OpenInventory>(),
+            bindings![KeyCode::KeyI],
+        ),
     ])
 }
 
@@ -149,6 +173,7 @@ fn sync_contexts(
         InputMode::Player => (true, false),
         InputMode::RadialMenu => (false, true),
         InputMode::Customizing => (false, false),
+        InputMode::Inventory => (false, false),
     };
 
     for entity in &q {

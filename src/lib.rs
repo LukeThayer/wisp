@@ -22,6 +22,7 @@ pub mod player;
 pub mod spells;
 pub mod trace;
 pub mod ui;
+pub mod weapons;
 pub mod world;
 
 /// Adds the gameplay plugin stack that both client and server need.
@@ -31,6 +32,7 @@ pub mod world;
 pub fn build_shared(app: &mut App) {
     app.add_plugins((
         input::InputPlugin,
+        weapons::WeaponsPlugin,
         spells::SpellsPlugin,
         player::PlayerPlugin,
         ui::UiPlugin,

@@ -5,6 +5,7 @@
 SpellDef(
     id: "iris",
     label: "Iris",
+    tint: Some((r: 1.0, g: 0.95, b: 0.55)),
     casts: [
         (
             id: "iris.burst",

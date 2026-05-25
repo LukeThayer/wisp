@@ -21,6 +21,19 @@ fn main() {
     ));
     wisp::build_shared(&mut app);
     app.add_plugins(wisp::net::ClientNetPlugin);
+    // Override the server addr from `--ip` / `--port` if present.
+    // `ClientNetPlugin::build` already inserted a `ConnectTo` carrying
+    // the default addr + a generated client_id; preserve the id and
+    // swap just the server field.
+    let server_addr = wisp::net::parse_addr_args(wisp::net::default_server_addr());
+    let client_id = app
+        .world()
+        .resource::<wisp::net::client::ConnectTo>()
+        .client_id;
+    app.insert_resource(wisp::net::client::ConnectTo {
+        server: server_addr,
+        client_id,
+    });
     // After ClientPlugins are registered (inside ClientNetPlugin), wire
     // avian via lightyear so Position/Rotation sync follows the
     // replication path (Stage Q).

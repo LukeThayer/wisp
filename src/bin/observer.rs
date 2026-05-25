@@ -150,6 +150,10 @@ enum Command {
     /// duplicated from `fireball.body.ron` — keep them in sync if the
     /// body file changes.
     ThrowFireball { origin: Vec3, velocity: Vec3 },
+    /// Send a `SpawnBodyMessage` for the `glacier_ball` body so the
+    /// server marks it with `RollingGlacier`. Lets the harness exercise
+    /// the trail-drop + OnTimeout path.
+    ThrowGlacier { origin: Vec3, velocity: Vec3 },
     Exit,
 }
 
@@ -241,6 +245,11 @@ fn parse_line(line: &str) -> Option<(f32, Command)> {
             let origin = read_vec3(&mut parts)?;
             let velocity = read_vec3(&mut parts)?;
             Command::ThrowFireball { origin, velocity }
+        }
+        "throw_glacier" => {
+            let origin = read_vec3(&mut parts)?;
+            let velocity = read_vec3(&mut parts)?;
+            Command::ThrowGlacier { origin, velocity }
         }
         "exit" => Command::Exit,
         _ => return None,
@@ -422,6 +431,7 @@ fn advance_script(
                         direction: [direction.x, direction.y, direction.z],
                         range,
                         magnitude,
+                        damage: 0.0,
                     });
                     trace::event(
                         "script_beam",
@@ -468,6 +478,7 @@ fn advance_script(
                         angular_damping: 0.1,
                         restitution: 0.02,
                         tint_seed: 0.0,
+                        tint: [1.0, 0.55, 0.15],
                         parent_cast: Some(ParentCastInfo {
                             spell_id: "fireball".to_string(),
                             cast_id: "fireball.throw".to_string(),
@@ -478,6 +489,37 @@ fn advance_script(
                     let _ = s.send::<PlayerInputChannel>(msg);
                     trace::event(
                         "script_throw_fireball",
+                        json!({
+                            "t": t,
+                            "origin": [origin.x, origin.y, origin.z],
+                            "velocity": [velocity.x, velocity.y, velocity.z],
+                        }),
+                    );
+                }
+            }
+            Command::ThrowGlacier { origin, velocity } => {
+                if let Some(s) = spawn_body.as_mut() {
+                    let msg = SpawnBodyMessage {
+                        origin: [origin.x, origin.y, origin.z],
+                        velocity: [velocity.x, velocity.y, velocity.z],
+                        shape: PropShape::Sphere { radius: 0.32 },
+                        mass: 6.0,
+                        friction: 0.2,
+                        linear_damping: 0.05,
+                        angular_damping: 0.05,
+                        restitution: 0.4,
+                        tint_seed: 0.0,
+                        tint: [0.55, 0.85, 1.0],
+                        parent_cast: Some(ParentCastInfo {
+                            spell_id: "rolling_glacier".to_string(),
+                            cast_id: "rolling_glacier.roll".to_string(),
+                            captured_charge: Some(1.0),
+                            chain_depth: 0,
+                        }),
+                    };
+                    let _ = s.send::<PlayerInputChannel>(msg);
+                    trace::event(
+                        "script_throw_glacier",
                         json!({
                             "t": t,
                             "origin": [origin.x, origin.y, origin.z],

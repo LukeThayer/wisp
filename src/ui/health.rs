@@ -46,11 +46,12 @@ struct HealthBarFill;
 #[derive(Component)]
 struct HealthBarText;
 
-/// Width and height of the bar (px). 200×14 sits comfortably above the
-/// bottom-left corner without crowding the crosshair cluster at center.
-const W: f32 = 200.0;
-const H: f32 = 14.0;
-const MARGIN: f32 = 20.0;
+/// Width and height of the bar (px). Bumped to 320×22 so the number
+/// inside is comfortably legible and the bar reads as a primary HUD
+/// element next to the new weapon panel.
+pub const W: f32 = 320.0;
+pub const H: f32 = 22.0;
+pub const MARGIN: f32 = 20.0;
 
 fn spawn_health_bar(
     mut commands: Commands,
@@ -99,7 +100,7 @@ fn spawn_health_bar(
                 HealthBarText,
                 Text::new("100 / 100"),
                 TextFont {
-                    font_size: 12.0,
+                    font_size: 16.0,
                     ..default()
                 },
                 TextColor(Color::srgba(1.0, 1.0, 1.0, 0.95)),

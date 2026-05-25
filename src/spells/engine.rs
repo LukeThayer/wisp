@@ -496,6 +496,14 @@ fn count_markers(world: &mut World, marker: MarkerKind) -> usize {
             .query_filtered::<(), With<crate::spells::portal::PortalTraveler>>()
             .iter(world)
             .count(),
+        MarkerKind::RollingGlacier => world
+            .query_filtered::<(), With<crate::spells::markers::RollingGlacier>>()
+            .iter(world)
+            .count(),
+        MarkerKind::FrostSpike => world
+            .query_filtered::<(), With<crate::spells::markers::FrostSpike>>()
+            .iter(world)
+            .count(),
     }
 }
 
@@ -817,6 +825,7 @@ mod child_cast_tests {
             id: SpellId::new(spell_id),
             label: "probe".into(),
             icon: None,
+            tint: None,
             casts: vec![CastDef {
                 id: CastId(cast_id.into()),
                 label: "probe".into(),

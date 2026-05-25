@@ -140,9 +140,12 @@ fn send_spawn_body_message(
         linear_damping: def.physics.linear_damping,
         angular_damping: def.physics.angular_damping,
         restitution: def.physics.restitution,
-        // No per-instance tint variation yet; clients render with the
-        // template's material via the existing NetworkedProp observer.
         tint_seed: 0.0,
+        tint: [
+            def.material.base_color.r,
+            def.material.base_color.g,
+            def.material.base_color.b,
+        ],
         parent_cast,
     };
 
@@ -160,11 +163,10 @@ fn prop_shape_from_collider(c: &ColliderShape) -> Option<PropShape> {
         ColliderShape::Cuboid { x, y, z } if (x - y).abs() < 1e-3 && (y - z).abs() < 1e-3 => {
             Some(PropShape::Cube { size: *x })
         }
-        // Non-cube cuboids are common enough that we treat them as a
-        // bounding cube using the average side. Replace this with a
-        // proper `PropShape::Cuboid { x, y, z }` if a spell needs it.
-        ColliderShape::Cuboid { x, y, z } => Some(PropShape::Cube {
-            size: (*x + *y + *z) / 3.0,
+        ColliderShape::Cuboid { x, y, z } => Some(PropShape::Cuboid {
+            x: *x,
+            y: *y,
+            z: *z,
         }),
         ColliderShape::Cylinder { .. } | ColliderShape::Capsule { .. } => None,
     }

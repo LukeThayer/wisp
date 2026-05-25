@@ -1,0 +1,11 @@
+// Potted Spring: a pot of meltwater that condenses into ice for casting.
+// Pairs the slow-rolling boulder (`rolling_glacier`) with a ground-spike
+// finisher (`frost_spire`) that consumes the frost the glacier left.
+WeaponDef(
+    id: "potted_spring",
+    label: "Potted Spring",
+    spells: [
+        "rolling_glacier",
+        "frost_spire",
+    ],
+)

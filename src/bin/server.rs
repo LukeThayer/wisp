@@ -22,6 +22,12 @@ fn main() {
         ScenePlugin,
     ));
     app.add_plugins(wisp::net::ServerNetPlugin);
+    // Override the bind addr from `--ip` / `--port` if present.
+    // `ServerNetPlugin::build` already inserted the default
+    // `ServerBind`; `insert_resource` replaces it. Done after
+    // `add_plugins` so the override always wins.
+    let bind_addr = wisp::net::parse_addr_args(wisp::net::default_server_addr());
+    app.insert_resource(wisp::net::server::ServerBind { addr: bind_addr });
     // Physics goes after ServerPlugins so LightyearAvianPlugin sees the
     // replication infra already initialised (Stage Q).
     wisp::add_avian_with_lightyear(&mut app);
@@ -38,6 +44,10 @@ fn main() {
     // Required so AreaDamage effects on spells (e.g. explosion_small)
     // actually apply hp changes.
     app.add_plugins(wisp::spells::damage::DamagePlugin);
+    // Ice magic: rolling glacier trail drops, frost spire spawn,
+    // frozen-ground lifetime. Pure server-side state — the client
+    // already gets the ice tiles + spike via component replication.
+    app.add_plugins(wisp::spells::ice::IcePlugin);
     info!("wisp server starting…");
     app.run();
 }
